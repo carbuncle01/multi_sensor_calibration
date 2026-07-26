@@ -1,0 +1,71 @@
+schema_version: 1
+reference_sensor: rgb
+
+sensors:
+  rgb:
+    image_topic: /realsense/color/image_raw
+    camera_info_topic: /realsense/color/camera_info
+    frame_id: realsense_color_optical_frame
+    # bag is the safest common provisional timeline. Header time can be selected
+    # after inspect-bag confirms that all cameras use the same clock domain.
+    timestamp_source: bag
+
+  thermal:
+    image_topic: /flir/image_raw
+    camera_info_topic: /flir/camera_info
+    frame_id: boson_optical_frame
+    timestamp_source: bag
+
+  evs:
+    # For intrinsics/extrinsics, generate images first and pass --images-dir.
+    frame_id: event_camera
+
+evs:
+  sensor_name: evs
+  source: metavision_file
+  representation: polarity
+
+  sources:
+    metavision_file:
+      # Supports Metavision event RAW and event-HDF5 files through
+      # metavision_core.event_io.EventsIterator.
+      path: ""
+      # Keep the *.raw.metadata.yaml sidecar next to the RAW file. When HDF5 is
+      # used, point this at the sidecar belonging to the source RAW recording.
+      metadata_path: ""
+      chunk_us: 10000
+      # RAW->HDF5 conversion normally applies timestamp shifting. The provisional
+      # mapping therefore treats shifted event time zero as recording start.
+      source_time_at_anchor_us: 0
+      # Set only when no OpenEB sidecar is available.
+      # reference_time_at_anchor_s: 0.0
+
+    ros_events:
+      topic: /event_camera/events
+      # header is the host reception time for the first packet represented by
+      # the ROS message. Correlation later estimates residual offset and drift.
+      anchor_timestamp_source: header
+
+    ros_event_image:
+      topic: /event_camera/event_image
+      # event_image header may be in the decoded EVS clock domain. Use bag time
+      # as the provisional common timeline unless inspect-bag proves otherwise.
+      timestamp_source: bag
+
+  window:
+    # periodic: generate on the EVS clock. reference_aligned: after time-sync,
+    # align each EVS representative timestamp with the corresponding RGB frame.
+    schedule: periodic
+    period_us: 20000
+    accumulation_us: 20000
+    # Metavision generation timestamp is always window end. center is used as
+    # the matching timestamp because it represents the exposure interval.
+    timestamp_policy: center
+    drop_partial_windows: true
+
+target:
+  type: checkerboard
+  # Number of inner corners, not number of squares.
+  columns: 8
+  rows: 6
+  square_size_m: 0.03

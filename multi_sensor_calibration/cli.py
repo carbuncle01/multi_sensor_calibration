@@ -1,0 +1,493 @@
+"""Command-line interface for multi-sensor calibration."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, Iterable
+
+from .calibration_images import CalibrationImage, bag_images, generated_evs_images
+from .event_windows import WindowDefinition, reference_aligned_window_ends
+from .io import load_yaml, sensor_config, target_config, write_yaml
+from .models import ClockEstimate
+
+
+def _evs_config(config: dict[str, Any]) -> dict[str, Any]:
+    value = config.get("evs")
+    if not isinstance(value, dict):
+        raise ValueError("evs configuration is required")
+    return value
+
+
+def _source_config(evs: dict[str, Any], source_type: str) -> dict[str, Any]:
+    sources = evs.get("sources")
+    if not isinstance(sources, dict) or source_type not in sources:
+        raise ValueError(f"evs.sources.{source_type} is not configured")
+    value = sources[source_type]
+    if not isinstance(value, dict):
+        raise ValueError(f"evs.sources.{source_type} must be a mapping")
+    return value
+
+
+def _load_clock_models(path: str | Path | None) -> dict[str, ClockEstimate]:
+    if not path:
+        return {}
+    value = load_yaml(path)
+    models = value.get("models")
+    if not isinstance(models, dict):
+        raise ValueError(f"{path} does not contain clock models")
+    return {
+        str(name): ClockEstimate.from_dict(model)
+        for name, model in models.items()
+    }
+
+
+def _corrected_images(
+    images: Iterable[CalibrationImage],
+    clock: ClockEstimate | None,
+) -> Iterable[CalibrationImage]:
+    if clock is None:
+        yield from images
+        return
+    for item in images:
+        yield replace(item, time_s=clock.apply(item.time_s))
+
+
+def _sensor_images(
+    config: dict[str, Any],
+    sensor_name: str,
+    *,
+    bag_path: str | Path | None,
+    generated_dir: str | Path | None,
+    every_n: int,
+    max_frames: int | None,
+) -> Iterable[CalibrationImage]:
+    sensor = sensor_config(config, sensor_name)
+    if generated_dir:
+        return generated_evs_images(
+            generated_dir, every_n=every_n, max_frames=max_frames
+        )
+    if bag_path is None:
+        raise ValueError(f"--bag or a generated image directory is required for {sensor_name}")
+    topic = sensor.get("image_topic")
+    if not topic:
+        raise ValueError(f"sensors.{sensor_name}.image_topic is required")
+    return bag_images(
+        bag_path,
+        str(topic),
+        timestamp_source=str(sensor.get("timestamp_source", "bag")),
+        every_n=every_n,
+        max_frames=max_frames,
+    )
+
+
+def command_inspect_bag(args: argparse.Namespace) -> None:
+    from .rosbag import inspect_topics
+
+    config = load_yaml(args.config) if args.config else {}
+    topics = None
+    if config:
+        topics = {
+            str(sensor["image_topic"])
+            for sensor in config.get("sensors", {}).values()
+            if isinstance(sensor, dict) and sensor.get("image_topic")
+        }
+        evs = config.get("evs", {})
+        for source in evs.get("sources", {}).values():
+            if isinstance(source, dict) and source.get("topic"):
+                topics.add(str(source["topic"]))
+    result = {
+        "bag": str(Path(args.bag).resolve()),
+        "topics": inspect_topics(args.bag, topics, args.max_messages),
+    }
+    if args.output:
+        write_yaml(args.output, result)
+    else:
+        import pprint
+
+        pprint.pp(result)
+
+
+def command_generate_evs(args: argparse.Namespace) -> None:
+    from .evs_pipeline import (
+        extract_ros_event_images,
+        generate_event_frames,
+        image_timestamps,
+        write_frames,
+    )
+    from .evs_sources import build_event_source
+
+    config = load_yaml(args.config)
+    evs = _evs_config(config)
+    source_type = args.source or str(evs.get("source", "metavision_file"))
+    source_value = _source_config(evs, source_type)
+    definition = WindowDefinition.from_dict(evs["window"])
+
+    if source_type == "ros_event_image":
+        if not args.bag:
+            raise ValueError("--bag is required for ros_event_image input")
+        frames = extract_ros_event_images(
+            args.bag,
+            str(source_value.get("topic", "/event_camera/event_image")),
+            definition,
+            timestamp_source=str(source_value.get("timestamp_source", "bag")),
+        )
+        write_frames(
+            frames,
+            args.output_dir,
+            source_type=source_type,
+            definition=definition,
+            anchor=None,
+        )
+        return
+
+    source = build_event_source(
+        source_type,
+        source_value,
+        bag_path=args.bag,
+        event_file=args.event_file,
+    )
+    end_times_us = None
+    if definition.schedule == "reference_aligned":
+        if not args.bag or not args.time_sync:
+            raise ValueError(
+                "reference_aligned generation requires --bag and --time-sync"
+            )
+        if source.anchor is None:
+            probe = source.batches()
+            try:
+                next(probe)
+            except StopIteration as exc:
+                raise ValueError("EVS input contains no events") from exc
+            finally:
+                probe.close()
+        if source.anchor is None:
+            raise ValueError("EVS input has no reference clock anchor")
+
+        clocks = _load_clock_models(args.time_sync)
+        evs_name = str(evs.get("sensor_name", "evs"))
+        if evs_name not in clocks:
+            raise ValueError(f"time sync result has no model for {evs_name}")
+        evs_clock = clocks[evs_name]
+        reference_name = str(config.get("reference_sensor", "rgb"))
+        reference = sensor_config(config, reference_name)
+        reference_times = image_timestamps(
+            args.bag,
+            str(reference["image_topic"]),
+            timestamp_source=str(reference.get("timestamp_source", "bag")),
+        )
+
+        def reference_to_event_time(reference_time_s: float) -> float:
+            provisional_reference_s = evs_clock.inverse(reference_time_s)
+            return source.anchor.to_source_us(provisional_reference_s) / 1_000_000.0
+
+        end_times_us = reference_aligned_window_ends(
+            reference_times,
+            reference_to_event_time=reference_to_event_time,
+            definition=definition,
+        )
+
+    frames = generate_event_frames(
+        source,
+        definition,
+        end_times_us=end_times_us,
+        representation=str(evs.get("representation", "polarity")),
+    )
+    write_frames(
+        frames,
+        args.output_dir,
+        source_type=source_type,
+        definition=definition,
+        anchor=source,
+    )
+
+
+def command_time_sync(args: argparse.Namespace) -> None:
+    from .evs_pipeline import event_activity, image_activity
+    from .evs_sources import build_event_source
+    from .time_sync import estimate_clock
+
+    config = load_yaml(args.config)
+    reference_name = str(config.get("reference_sensor", "rgb"))
+    reference = sensor_config(config, reference_name)
+    reference_signal = image_activity(
+        args.bag,
+        str(reference["image_topic"]),
+        timestamp_source=str(reference.get("timestamp_source", "bag")),
+        max_frames=args.max_frames,
+    )
+    if not reference_signal:
+        raise ValueError("reference camera produced no activity samples")
+
+    estimates: dict[str, ClockEstimate] = {
+        reference_name: ClockEstimate.identity(
+            reference_signal[0].time_s, args.bin_ms / 1000.0
+        )
+    }
+    signal_summary = {
+        reference_name: {
+            "kind": "image_difference",
+            "samples": len(reference_signal),
+        }
+    }
+
+    for sensor_name, sensor in config.get("sensors", {}).items():
+        if sensor_name in {reference_name, str(_evs_config(config).get("sensor_name", "evs"))}:
+            continue
+        signal = image_activity(
+            args.bag,
+            str(sensor["image_topic"]),
+            timestamp_source=str(sensor.get("timestamp_source", "bag")),
+            max_frames=args.max_frames,
+        )
+        estimates[sensor_name] = estimate_clock(
+            reference_signal,
+            signal,
+            bin_width_s=args.bin_ms / 1000.0,
+            max_lag_s=args.max_lag_ms / 1000.0,
+            window_s=args.window_s,
+            min_correlation=args.min_correlation,
+        )
+        signal_summary[sensor_name] = {
+            "kind": "image_difference",
+            "samples": len(signal),
+        }
+
+    evs = _evs_config(config)
+    evs_name = str(evs.get("sensor_name", "evs"))
+    source_type = args.evs_source or str(evs.get("source", "metavision_file"))
+    source_value = _source_config(evs, source_type)
+    if source_type == "ros_event_image":
+        evs_signal = image_activity(
+            args.bag,
+            str(source_value.get("topic", "/event_camera/event_image")),
+            timestamp_source=str(source_value.get("timestamp_source", "bag")),
+            max_frames=args.max_frames,
+        )
+        anchor = None
+        signal_kind = "event_image_difference"
+    else:
+        source = build_event_source(
+            source_type,
+            source_value,
+            bag_path=args.bag,
+            event_file=args.event_file,
+        )
+        evs_signal = event_activity(source)
+        anchor = source.anchor
+        signal_kind = "event_rate"
+
+    estimates[evs_name] = estimate_clock(
+        reference_signal,
+        evs_signal,
+        bin_width_s=args.bin_ms / 1000.0,
+        max_lag_s=args.max_lag_ms / 1000.0,
+        window_s=args.window_s,
+        min_correlation=args.min_correlation,
+    )
+    signal_summary[evs_name] = {
+        "kind": signal_kind,
+        "samples": len(evs_signal),
+        "source_type": source_type,
+        "provisional_anchor": anchor.to_dict() if anchor is not None else None,
+    }
+
+    write_yaml(
+        args.output,
+        {
+            "schema_version": 1,
+            "reference_sensor": reference_name,
+            "method": "windowed_activity_cross_correlation_affine_clock",
+            "models": {
+                name: estimate.to_dict() for name, estimate in estimates.items()
+            },
+            "signals": signal_summary,
+            "limitations": [
+                "Software-only estimation; it does not provide hardware simultaneity.",
+                "Offset includes sensor exposure/window semantics and transport latency.",
+                "Validate the result on an independent common-motion recording.",
+            ],
+        },
+    )
+
+
+def command_intrinsics(args: argparse.Namespace) -> None:
+    from .intrinsics import calibrate_intrinsics, detect_checkerboard
+
+    config = load_yaml(args.config)
+    sensor = sensor_config(config, args.sensor)
+    images = _sensor_images(
+        config,
+        args.sensor,
+        bag_path=args.bag,
+        generated_dir=args.images_dir,
+        every_n=args.every_n,
+        max_frames=args.max_frames,
+    )
+    observations = detect_checkerboard(images, target_config(config))
+    result = calibrate_intrinsics(
+        observations,
+        target_config(config),
+        camera_name=args.sensor,
+        frame_id=str(sensor.get("frame_id", args.sensor)),
+    )
+    write_yaml(args.output, result)
+
+
+def command_extrinsics(args: argparse.Namespace) -> None:
+    from .extrinsics import calibrate_pair, pair_observations
+    from .intrinsics import detect_checkerboard
+
+    config = load_yaml(args.config)
+    clocks = _load_clock_models(args.time_sync)
+    reference_images = _corrected_images(
+        _sensor_images(
+            config,
+            args.reference,
+            bag_path=args.bag,
+            generated_dir=args.reference_images_dir,
+            every_n=args.every_n,
+            max_frames=args.max_frames,
+        ),
+        clocks.get(args.reference),
+    )
+    sensor_images = _corrected_images(
+        _sensor_images(
+            config,
+            args.sensor,
+            bag_path=args.bag,
+            generated_dir=args.sensor_images_dir,
+            every_n=args.every_n,
+            max_frames=args.max_frames,
+        ),
+        clocks.get(args.sensor),
+    )
+    target = target_config(config)
+    reference_observations = detect_checkerboard(reference_images, target)
+    sensor_observations = detect_checkerboard(sensor_images, target)
+    pairs = pair_observations(
+        reference_observations,
+        sensor_observations,
+        args.max_pair_delta_ms / 1000.0,
+    )
+    reference_sensor = sensor_config(config, args.reference)
+    calibrated_sensor = sensor_config(config, args.sensor)
+    result = calibrate_pair(
+        pairs,
+        target,
+        load_yaml(args.reference_intrinsics),
+        load_yaml(args.sensor_intrinsics),
+        reference_frame=str(reference_sensor.get("frame_id", args.reference)),
+        sensor_frame=str(calibrated_sensor.get("frame_id", args.sensor)),
+        max_pair_delta_s=args.max_pair_delta_ms / 1000.0,
+    )
+    write_yaml(args.output, result)
+
+
+def command_manual_extrinsic(args: argparse.Namespace) -> None:
+    from .extrinsics import manual_extrinsic
+
+    write_yaml(
+        args.output,
+        manual_extrinsic(
+            parent_frame=args.parent_frame,
+            child_frame=args.child_frame,
+            xyz_m=args.xyz,
+            rpy_rad=args.rpy,
+        ),
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="multi-sensor-calibration",
+        description="Offline EVS/RGB/thermal calibration from ROS 2 bags and event files.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    inspect_parser = subparsers.add_parser("inspect-bag")
+    inspect_parser.add_argument("--bag", required=True)
+    inspect_parser.add_argument("--config")
+    inspect_parser.add_argument("--max-messages", type=int, default=500)
+    inspect_parser.add_argument("--output")
+    inspect_parser.set_defaults(function=command_inspect_bag)
+
+    generate_parser = subparsers.add_parser("generate-evs")
+    generate_parser.add_argument("--config", required=True)
+    generate_parser.add_argument(
+        "--source",
+        choices=("metavision_file", "ros_events", "ros_event_image"),
+    )
+    generate_parser.add_argument("--bag")
+    generate_parser.add_argument("--event-file")
+    generate_parser.add_argument("--time-sync")
+    generate_parser.add_argument("--output-dir", required=True)
+    generate_parser.set_defaults(function=command_generate_evs)
+
+    sync_parser = subparsers.add_parser("time-sync")
+    sync_parser.add_argument("--config", required=True)
+    sync_parser.add_argument("--bag", required=True)
+    sync_parser.add_argument(
+        "--evs-source",
+        choices=("metavision_file", "ros_events", "ros_event_image"),
+    )
+    sync_parser.add_argument("--event-file")
+    sync_parser.add_argument("--output", required=True)
+    sync_parser.add_argument("--bin-ms", type=float, default=10.0)
+    sync_parser.add_argument("--max-lag-ms", type=float, default=500.0)
+    sync_parser.add_argument("--window-s", type=float, default=15.0)
+    sync_parser.add_argument("--min-correlation", type=float, default=0.1)
+    sync_parser.add_argument("--max-frames", type=int)
+    sync_parser.set_defaults(function=command_time_sync)
+
+    intrinsics_parser = subparsers.add_parser("intrinsics")
+    intrinsics_parser.add_argument("--config", required=True)
+    intrinsics_parser.add_argument("--sensor", required=True)
+    intrinsics_parser.add_argument("--bag")
+    intrinsics_parser.add_argument("--images-dir")
+    intrinsics_parser.add_argument("--every-n", type=int, default=1)
+    intrinsics_parser.add_argument("--max-frames", type=int)
+    intrinsics_parser.add_argument("--output", required=True)
+    intrinsics_parser.set_defaults(function=command_intrinsics)
+
+    extrinsics_parser = subparsers.add_parser("extrinsics")
+    extrinsics_parser.add_argument("--config", required=True)
+    extrinsics_parser.add_argument("--bag", required=True)
+    extrinsics_parser.add_argument("--reference", required=True)
+    extrinsics_parser.add_argument("--sensor", required=True)
+    extrinsics_parser.add_argument("--reference-images-dir")
+    extrinsics_parser.add_argument("--sensor-images-dir")
+    extrinsics_parser.add_argument("--reference-intrinsics", required=True)
+    extrinsics_parser.add_argument("--sensor-intrinsics", required=True)
+    extrinsics_parser.add_argument("--time-sync")
+    extrinsics_parser.add_argument("--max-pair-delta-ms", type=float, default=20.0)
+    extrinsics_parser.add_argument("--every-n", type=int, default=1)
+    extrinsics_parser.add_argument("--max-frames", type=int)
+    extrinsics_parser.add_argument("--output", required=True)
+    extrinsics_parser.set_defaults(function=command_extrinsics)
+
+    manual_parser = subparsers.add_parser("manual-extrinsic")
+    manual_parser.add_argument("--parent-frame", required=True)
+    manual_parser.add_argument("--child-frame", required=True)
+    manual_parser.add_argument("--xyz", type=float, nargs=3, required=True)
+    manual_parser.add_argument("--rpy", type=float, nargs=3, required=True)
+    manual_parser.add_argument("--output", required=True)
+    manual_parser.set_defaults(function=command_manual_extrinsic)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        args.function(args)
+    except (RuntimeError, ValueError, FileNotFoundError) as exc:
+        parser.error(str(exc))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
