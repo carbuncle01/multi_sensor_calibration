@@ -28,6 +28,47 @@ EVSには次の3系統を同じフレームmanifestへ正規化して扱いま�
 Metavision SDKはRAWとevent-HDF5を`EventsIterator`で同様に読めます。
 HDF5 eventの`/CD/events`は`x, y, p, t[us]`を持ちます。
 
+## OpenEB E2V grayscale reconstruction
+
+`generate-evs`の`representation`には、単純な`polarity`、`count`に加えて
+OpenEB 5.2.0 Core MLの`e2v`を選択できます。E2Vは学習済みのrecurrent modelで
+event volumeからgrayscale画像を再構築します。
+
+E2VはDocker内で実行する前提です。JetPilotの`Dockerfile.silky_evcam`はOpenEBの
+Python bindingsと`metavision_core_ml`をbuildし、OpenEB同梱checkpointを次に保持します。
+
+```text
+/opt/openeb/sdk/modules/core_ml/models/e2v.ckpt
+```
+
+ホストmacOSへのOpenEB/PyTorch導入は不要です。E2V関連moduleは`representation: e2v`
+を選んだ場合にだけ遅延importされます。
+
+E2V出力は「指定時刻までのeventをmodelへ入力した後の状態」なので、timestampは
+window centerではなくwindow endです。`representation: e2v`を選ぶとCLIが
+`timestamp_policy: end`を適用します。設定として明示する場合は次のようにします。
+
+```yaml
+evs:
+  representation: e2v
+  e2v:
+    checkpoint_path: /opt/openeb/sdk/modules/core_ml/models/e2v.ckpt
+    device: auto
+    warmup_frames: 5
+    normalize_num_stds: 6.0
+  window:
+    schedule: periodic
+    period_us: 20000
+    accumulation_us: 20000
+    timestamp_policy: end
+    drop_partial_windows: true
+```
+
+modelはstatefulなので、各出力間のevent sliceを重複なしで順番に入力します。最初の
+`warmup_frames`枚はmodel stateが安定するまで生成だけ行い、manifestには保存しません。
+`frames.csv`には実際にmodelへ入力した区間を`window_start_us`と`window_end_us`で
+記録します。
+
 ## Event windowとtimestamp契約
 
 生成時刻を`T_end`、蓄積時間を`dt`とすると、フレームに含めるイベントは常に
@@ -37,7 +78,9 @@ HDF5 eventの`/CD/events`は`x, y, p, t[us]`を持ちます。
 [T_end - dt, T_end)
 ```
 
-これはMetavision `PeriodicFrameGenerationAlgorithm`の規約と同じです。
+これは`polarity`と`count`で使用するMetavision
+`PeriodicFrameGenerationAlgorithm`相当の規約です。E2Vはrecurrent stateを維持するため、
+最初の区間以降は直前の出力時刻から現在の出力時刻までを重複なく入力します。
 
 1枚ごとに次の時刻をすべて`frames.csv`へ保存します。
 
@@ -182,6 +225,20 @@ ros2 run multi_sensor_calibration multi-sensor-calibration generate-evs \
   --output-dir result/evs_periodic
 ```
 
+OpenEB E2Vでgrayscale画像を再構築する場合は次を実行します。E2V用の
+`timestamp_policy: end`は自動的に適用されます。
+
+```bash
+ros2 run multi_sensor_calibration multi-sensor-calibration generate-evs \
+  --config config/jetpilot_evs_rgb_thermal.yaml \
+  --source metavision_file \
+  --representation e2v \
+  --event-file /workspaces/record/openeb/calibration.raw \
+  --e2v-checkpoint /opt/openeb/sdk/modules/core_ml/models/e2v.ckpt \
+  --e2v-device auto \
+  --output-dir result/evs_e2v_periodic
+```
+
 extrinsic用には設定の`evs.window.schedule`を`reference_aligned`へ変更し、時刻同期結果と
 RGB bagを渡します。
 
@@ -194,6 +251,9 @@ ros2 run multi_sensor_calibration multi-sensor-calibration generate-evs \
   --time-sync result/time_sync.yaml \
   --output-dir result/evs_rgb_aligned
 ```
+
+E2Vでも同じ`reference_aligned` scheduleを使用できます。E2Vでは代表時刻がwindow end
+なので、RGB frame時刻までのeventをmodelへ入力した直後の再構築画像が対応付けられます。
 
 ### 4. Intrinsic calibration
 
@@ -253,6 +313,8 @@ ros2 run multi_sensor_calibration multi-sensor-calibration manual-extrinsic \
 - 時刻同期はsoftware推定であり、hardware同時性を保証しない
 - rolling shutter、Thermalの応答遅れ、通常カメラの露光timestamp semanticsは別途評価が必要
 - ROS EventPacketの復号には`event_camera_py`が必要
+- E2VにはDocker内のOpenEB Python bindings、`metavision_core_ml`、PyTorchが必要
+- E2V checkpointはOpenEB 5.2.0同梱版を前提とし、信頼できないcheckpointを読み込まない
 - 外部キャリブレーションは2カメラずつRGB基準で求める
 - 自動結果をJetPilot runtime設定へ自動反映しない
 

@@ -113,6 +113,7 @@ def command_inspect_bag(args: argparse.Namespace) -> None:
 def command_generate_evs(args: argparse.Namespace) -> None:
     from .evs_pipeline import (
         extract_ros_event_images,
+        generate_e2v_frames,
         generate_event_frames,
         image_timestamps,
         write_frames,
@@ -124,8 +125,18 @@ def command_generate_evs(args: argparse.Namespace) -> None:
     source_type = args.source or str(evs.get("source", "metavision_file"))
     source_value = _source_config(evs, source_type)
     definition = WindowDefinition.from_dict(evs["window"])
+    representation = args.representation or str(
+        evs.get("representation", "polarity")
+    )
+    if representation == "e2v" and definition.timestamp_policy != "end":
+        definition = replace(definition, timestamp_policy="end")
 
     if source_type == "ros_event_image":
+        if representation == "e2v":
+            raise ValueError(
+                "E2V reconstruction requires metavision_file or ros_events input; "
+                "ros_event_image is already rendered"
+            )
         if not args.bag:
             raise ValueError("--bag is required for ros_event_image input")
         frames = extract_ros_event_images(
@@ -140,6 +151,7 @@ def command_generate_evs(args: argparse.Namespace) -> None:
             source_type=source_type,
             definition=definition,
             anchor=None,
+            representation="source_image",
         )
         return
 
@@ -189,18 +201,51 @@ def command_generate_evs(args: argparse.Namespace) -> None:
             definition=definition,
         )
 
-    frames = generate_event_frames(
-        source,
-        definition,
-        end_times_us=end_times_us,
-        representation=str(evs.get("representation", "polarity")),
-    )
+    representation_metadata = None
+    if representation == "e2v":
+        from .e2v import E2VReconstructor
+
+        e2v_config = evs.get("e2v", {})
+        if not isinstance(e2v_config, dict):
+            raise ValueError("evs.e2v must be a mapping")
+        checkpoint = args.e2v_checkpoint or e2v_config.get("checkpoint_path")
+        device = args.e2v_device or str(e2v_config.get("device", "auto"))
+        warmup_frames = (
+            args.e2v_warmup_frames
+            if args.e2v_warmup_frames is not None
+            else int(e2v_config.get("warmup_frames", 5))
+        )
+        reconstructor = E2VReconstructor(
+            checkpoint,
+            device=device,
+            normalize_num_stds=float(
+                e2v_config.get("normalize_num_stds", 6.0)
+            ),
+        )
+        frames = generate_e2v_frames(
+            source,
+            definition,
+            reconstructor,
+            end_times_us=end_times_us,
+            warmup_frames=warmup_frames,
+        )
+        representation_metadata = reconstructor.metadata()
+        representation_metadata["warmup_frames_discarded"] = warmup_frames
+    else:
+        frames = generate_event_frames(
+            source,
+            definition,
+            end_times_us=end_times_us,
+            representation=representation,
+        )
     write_frames(
         frames,
         args.output_dir,
         source_type=source_type,
         definition=definition,
         anchor=source,
+        representation=representation,
+        representation_metadata=representation_metadata,
     )
 
 
@@ -420,9 +465,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--source",
         choices=("metavision_file", "ros_events", "ros_event_image"),
     )
+    generate_parser.add_argument(
+        "--representation",
+        choices=("polarity", "count", "e2v"),
+    )
     generate_parser.add_argument("--bag")
     generate_parser.add_argument("--event-file")
     generate_parser.add_argument("--time-sync")
+    generate_parser.add_argument("--e2v-checkpoint")
+    generate_parser.add_argument("--e2v-device")
+    generate_parser.add_argument("--e2v-warmup-frames", type=int)
     generate_parser.add_argument("--output-dir", required=True)
     generate_parser.set_defaults(function=command_generate_evs)
 

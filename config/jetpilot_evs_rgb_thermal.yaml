@@ -24,6 +24,14 @@ evs:
   sensor_name: evs
   source: metavision_file
   representation: polarity
+  # To reconstruct grayscale images with OpenEB Core ML, set representation
+  # to e2v. E2V generation automatically uses timestamp_policy=end. The Docker
+  # image keeps OpenEB's bundled checkpoint at this path.
+  e2v:
+    checkpoint_path: /opt/openeb/sdk/modules/core_ml/models/e2v.ckpt
+    device: auto
+    warmup_frames: 5
+    normalize_num_stds: 6.0
 
   sources:
     metavision_file:

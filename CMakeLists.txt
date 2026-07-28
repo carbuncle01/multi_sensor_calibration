@@ -26,6 +26,10 @@ if(BUILD_TESTING)
     test/test_event_windows.py
   )
   ament_add_pytest_test(
+    test_e2v
+    test/test_e2v.py
+  )
+  ament_add_pytest_test(
     test_time_sync
     test/test_time_sync.py
   )

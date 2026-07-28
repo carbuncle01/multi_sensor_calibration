@@ -189,6 +189,155 @@ def generate_event_frames(
     yield from _stream_frames(source, definition, end_times_us, representation)
 
 
+def _stream_e2v_frames(
+    source,
+    definition: WindowDefinition,
+    end_times_us: Sequence[int] | None,
+    reconstructor,
+    warmup_frames: int,
+) -> Iterator[GeneratedFrame]:
+    """Generate stateful E2V frames from chronological, non-overlapping slices."""
+
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError("NumPy is required for E2V reconstruction") from exc
+
+    if definition.timestamp_policy != "end":
+        raise ValueError(
+            "E2V reconstruction requires evs.window.timestamp_policy: end "
+            "because a reconstructed frame represents model state at slice end"
+        )
+    if warmup_frames < 0:
+        raise ValueError("evs.e2v.warmup_frames must be non-negative")
+
+    ends = iter(end_times_us) if end_times_us is not None else None
+    next_end_us = next(ends, None) if ends is not None else None
+    previous_end_us = None
+    first_source_event_us = None
+    buffered = []
+    reconstructed_count = 0
+
+    def advance_target():
+        nonlocal next_end_us
+        if ends is not None:
+            next_end_us = next(ends, None)
+        else:
+            next_end_us += int(definition.period_us)
+
+    for batch in source.batches():
+        events = batch.events
+        if len(events) == 0:
+            continue
+        if first_source_event_us is None:
+            first_source_event_us = int(events["t"][0])
+            if next_end_us is None and ends is None:
+                period_us = definition.period_us
+                if period_us is None:
+                    raise ValueError("period_us is required for periodic E2V generation")
+                earliest = first_source_event_us
+                if definition.drop_partial_windows:
+                    earliest += definition.accumulation_us
+                next_end_us = ((earliest + period_us - 1) // period_us) * period_us
+
+        buffered.append(events)
+        latest_us = int(events["t"][-1])
+        while next_end_us is not None and next_end_us <= latest_us:
+            if (
+                previous_end_us is None
+                and first_source_event_us is not None
+                and next_end_us <= first_source_event_us
+            ):
+                advance_target()
+                continue
+            if previous_end_us is None:
+                model_input_start_us = next_end_us - definition.accumulation_us
+                if (
+                    definition.drop_partial_windows
+                    and first_source_event_us is not None
+                    and model_input_start_us < first_source_event_us
+                ):
+                    advance_target()
+                    continue
+                model_input_start_us = max(
+                    model_input_start_us, int(first_source_event_us)
+                )
+            else:
+                model_input_start_us = previous_end_us
+
+            if model_input_start_us >= next_end_us:
+                raise ValueError("E2V target timestamps must be strictly increasing")
+
+            all_events = (
+                np.concatenate(buffered) if len(buffered) > 1 else buffered[0]
+            )
+            selected = all_events[
+                (all_events["t"] >= model_input_start_us)
+                & (all_events["t"] < next_end_us)
+            ]
+            image = reconstructor.reconstruct(
+                selected,
+                width=source.width,
+                height=source.height,
+                start_us=model_input_start_us,
+                end_us=next_end_us,
+            )
+            representative_us, event_mean_us = representative_time_us(
+                definition,
+                model_input_start_us,
+                next_end_us,
+                selected["t"] if len(selected) else None,
+            )
+            frame = GeneratedFrame(
+                image=image,
+                window=EventWindow(
+                    start_us=model_input_start_us,
+                    end_us=next_end_us,
+                    representative_us=representative_us,
+                    event_count=len(selected),
+                    event_mean_us=event_mean_us,
+                ),
+                reference_time_s=(
+                    source.anchor.to_reference_s(representative_us)
+                    if source.anchor is not None
+                    else None
+                ),
+            )
+
+            previous_end_us = next_end_us
+            reconstructed_count += 1
+            advance_target()
+            if next_end_us is not None:
+                all_events = all_events[all_events["t"] >= previous_end_us]
+                buffered = [all_events] if len(all_events) else []
+            else:
+                buffered = []
+
+            if reconstructed_count > warmup_frames:
+                yield frame
+
+
+def generate_e2v_frames(
+    source,
+    definition: WindowDefinition,
+    reconstructor,
+    *,
+    end_times_us: Sequence[int] | None = None,
+    warmup_frames: int = 5,
+) -> Iterator[GeneratedFrame]:
+    """Generate OpenEB E2V frames compatible with the calibration manifest."""
+
+    if definition.schedule == "reference_aligned" and end_times_us is None:
+        raise ValueError("reference_aligned E2V generation requires end_times_us")
+    yield from _stream_e2v_frames(
+        source,
+        definition,
+        end_times_us,
+        reconstructor,
+        warmup_frames,
+    )
+
+
 def extract_ros_event_images(
     bag_path: str | Path,
     topic: str,
@@ -228,6 +377,8 @@ def write_frames(
     source_type: str,
     definition: WindowDefinition,
     anchor: TimeAnchor | Any | None,
+    representation: str | None = None,
+    representation_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
         import cv2
@@ -288,6 +439,7 @@ def write_frames(
     resolved_anchor = getattr(anchor, "anchor", anchor)
     metadata = {
         "source_type": source_type,
+        "representation": representation,
         "frame_count": len(rows),
         "window": definition.to_dict(),
         "clock_anchor": (
@@ -295,5 +447,7 @@ def write_frames(
         ),
         "frames_manifest": str(manifest_path),
     }
+    if representation_metadata:
+        metadata["representation_metadata"] = representation_metadata
     write_yaml(destination / "metadata.yaml", metadata)
     return metadata
