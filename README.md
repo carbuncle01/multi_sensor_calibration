@@ -44,6 +44,13 @@ Python bindingsと`metavision_core_ml`をbuildし、OpenEB同梱checkpointを次
 ホストmacOSへのOpenEB/PyTorch導入は不要です。E2V関連moduleは`representation: e2v`
 を選んだ場合にだけ遅延importされます。
 
+Jetson/arm64ではOpenEBとSilkyEvCam driverによるevent recordingだけを使用し、
+PyTorch E2V検証はDocker build時にスキップします。E2V grayscale reconstructionは
+x86_64/amd64 Docker環境で実行します。x86_64 imageは`ros2 run`と同じsystem Pythonへ
+CUDA 13.0版PyTorchを導入し、Docker build時に`torch.version.cuda`のmajor versionと
+`EventToVideo`のimportを検証します。build中はGPU deviceへ接続しないため、
+`torch.cuda.is_available()`はE2V実行時に確認されます。
+
 E2V出力は「指定時刻までのeventをmodelへ入力した後の状態」なので、timestampは
 window centerではなくwindow endです。`representation: e2v`を選ぶとCLIが
 `timestamp_policy: end`を適用します。設定として明示する場合は次のようにします。
