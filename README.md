@@ -307,6 +307,69 @@ ros2 run multi_sensor_calibration multi-sensor-calibration manual-extrinsic \
 手動結果には`unvalidated`が記録されます。別データでのoverlay検証後にのみruntimeへ
 反映してください。
 
+## Kalibr pipeline
+
+ROS 2/OpenEB側では、時計補正済みのmono8 PNGデータセットまでを生成します。
+ROS 1 NoeticとKalibrは`tools/kalibr`の専用Dockerだけに閉じ込めます。
+
+設定の`kalibr.cameras`はKalibr camera chainの順番です。隣接カメラに共通観測が必要なため、
+3カメラでは`EVS → RGB → Thermal`を既定にしています。RGB＋EVSだけで検証する場合は、
+使用する設定ファイルの`kalibr.cameras`からThermalを外してください。
+
+E2V画像を先に`reference_aligned`で生成した後、Kalibr入力をexportします。
+
+```bash
+ros2 run multi_sensor_calibration multi-sensor-calibration export-kalibr \
+  --config config/jetpilot_evs_rgb_thermal.yaml \
+  --bag /workspaces/record/calibration_bag \
+  --time-sync result/time_sync.yaml \
+  --images-dir evs=result/evs_e2v_aligned \
+  --output-dir result/kalibr_dataset
+```
+
+`--images-dir SENSOR=PATH`は複数回指定できます。指定されなかったcameraはROS 2 bagの
+`image_topic`から読み出します。
+
+export処理は次を保証します。
+
+- `time_sync.yaml`の時計モデルを各timestampへ一度だけ適用
+- RGB基準の約4 Hzの時刻列に最も近い画像を各cameraから一対一で選択
+- `approximate_sync_s`を超える組と、全cameraが揃わない組を除外
+- 歪み補正していないsingle-channel 8-bit PNGを生成
+- 補正後timestampをナノ秒整数のファイル名として保存
+- 入力timestamp、時計補正量、補正後timestamp、基準時刻との差を`manifest.csv`へ保存
+- checkerboard設定をKalibr形式の`target.yaml`へ変換
+- 使用した時計モデルを`time_sync.yaml`としてdataset内へ複製
+
+生成物は次の構造です。
+
+```text
+kalibr_dataset/
+├── cam0/<corrected_timestamp_ns>.png
+├── cam1/<corrected_timestamp_ns>.png
+├── cam2/<corrected_timestamp_ns>.png
+├── manifest.csv
+├── target.yaml
+├── time_sync.yaml
+└── job.yaml
+```
+
+Kalibr専用imageをbuildし、入力をread-only mountして実行します。
+
+```bash
+./tools/kalibr/build.sh
+
+./tools/kalibr/calibrate.sh \
+  result/kalibr_dataset \
+  result/kalibr_output
+```
+
+Docker内では`kalibr_bagcreater`によるROS 1 bag生成と
+`kalibr_calibrate_cameras`だけを行います。結果は`kalibr-camchain.yaml`、
+詳細text、PDF report、実行log、使用したKalibr commitを記録したmetadataです。
+既存結果の意図しない上書きを避けるため、datasetと出力ディレクトリは空である必要が
+あります。
+
 ## 現時点の制約
 
 - checkerboardとpinhole/radtan modelのみ
@@ -316,6 +379,8 @@ ros2 run multi_sensor_calibration multi-sensor-calibration manual-extrinsic \
 - E2VにはDocker内のOpenEB Python bindings、`metavision_core_ml`、PyTorchが必要
 - E2V checkpointはOpenEB 5.2.0同梱版を前提とし、信頼できないcheckpointを読み込まない
 - 外部キャリブレーションは2カメラずつRGB基準で求める
+- Kalibr DockerはROS 1 Noeticを使用し、ROS 2/OpenEBコンテナとは統合しない
+- Kalibr exportはcamera間の時計推定を行わず、事前に生成した`time_sync.yaml`を必須とする
 - 自動結果をJetPilot runtime設定へ自動反映しない
 
 ## 参考仕様

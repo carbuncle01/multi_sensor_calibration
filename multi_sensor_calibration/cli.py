@@ -445,6 +445,156 @@ def command_manual_extrinsic(args: argparse.Namespace) -> None:
     )
 
 
+def _named_directories(values: Iterable[str]) -> dict[str, str]:
+    result = {}
+    for value in values:
+        sensor, separator, directory = value.partition("=")
+        sensor = sensor.strip()
+        directory = directory.strip()
+        if not separator or not sensor or not directory:
+            raise ValueError(
+                "--images-dir must use SENSOR=PATH format, for example "
+                "--images-dir evs=result/evs_e2v"
+            )
+        if sensor in result:
+            raise ValueError(f"--images-dir was specified more than once for {sensor}")
+        result[sensor] = directory
+    return result
+
+
+def command_export_kalibr(args: argparse.Namespace) -> None:
+    from .kalibr_export import (
+        bag_frame_metadata,
+        common_matches,
+        export_dataset,
+        generated_frame_metadata,
+        parse_camera_exports,
+        select_reference_frames,
+    )
+
+    config = load_yaml(args.config)
+    kalibr = config.get("kalibr")
+    if not isinstance(kalibr, dict):
+        raise ValueError("kalibr configuration is required")
+    cameras = parse_camera_exports(config)
+    camera_sensors = {camera.sensor for camera in cameras}
+    image_directories = _named_directories(args.images_dir)
+    unknown_directories = set(image_directories) - camera_sensors
+    if unknown_directories:
+        raise ValueError(
+            "--images-dir contains sensors not present in kalibr.cameras: "
+            + ", ".join(sorted(unknown_directories))
+        )
+
+    reference_sensor = str(
+        kalibr.get("reference_sensor", config.get("reference_sensor", "rgb"))
+    )
+    if reference_sensor not in camera_sensors:
+        raise ValueError("kalibr.reference_sensor must be present in kalibr.cameras")
+    if not args.time_sync:
+        raise ValueError(
+            "--time-sync is required so Kalibr never receives uncorrected "
+            "multi-camera timestamps"
+        )
+    sync_document = load_yaml(args.time_sync)
+    sync_reference = str(sync_document.get("reference_sensor", ""))
+    if sync_reference != reference_sensor:
+        raise ValueError(
+            f"time sync reference is {sync_reference!r}, but Kalibr export "
+            f"requires {reference_sensor!r}"
+        )
+    clocks = _load_clock_models(args.time_sync)
+    missing_clocks = camera_sensors - set(clocks)
+    if missing_clocks:
+        raise ValueError(
+            "time sync result has no clock model for: "
+            + ", ".join(sorted(missing_clocks))
+        )
+
+    sensor_configs = {
+        camera.sensor: sensor_config(config, camera.sensor) for camera in cameras
+    }
+    frames_by_sensor = {}
+    for camera in cameras:
+        if camera.sensor in image_directories:
+            frames = generated_frame_metadata(
+                image_directories[camera.sensor],
+                clock=clocks[camera.sensor],
+            )
+        else:
+            if not args.bag:
+                raise ValueError(
+                    f"--bag is required because {camera.sensor} is not supplied "
+                    "with --images-dir"
+                )
+            topic = sensor_configs[camera.sensor].get("image_topic")
+            if not topic:
+                raise ValueError(
+                    f"sensors.{camera.sensor}.image_topic is required or provide "
+                    f"--images-dir {camera.sensor}=PATH"
+                )
+            frames = bag_frame_metadata(
+                args.bag,
+                str(topic),
+                timestamp_source=str(
+                    sensor_configs[camera.sensor].get("timestamp_source", "bag")
+                ),
+                clock=clocks[camera.sensor],
+            )
+        if not frames:
+            raise ValueError(f"sensor {camera.sensor} produced no input frames")
+        frames_by_sensor[camera.sensor] = frames
+
+    export_rate_hz = (
+        args.rate_hz
+        if args.rate_hz is not None
+        else float(kalibr.get("export_rate_hz", 4.0))
+    )
+    approximate_sync_s = (
+        args.max_pair_delta_ms / 1000.0
+        if args.max_pair_delta_ms is not None
+        else float(kalibr.get("approximate_sync_s", 0.02))
+    )
+    reference_frames = select_reference_frames(
+        frames_by_sensor[reference_sensor],
+        export_rate_hz,
+    )
+    common_reference, matches = common_matches(
+        reference_frames,
+        frames_by_sensor,
+        reference_sensor,
+        approximate_sync_s,
+    )
+    if args.max_frames is not None:
+        if args.max_frames <= 0:
+            raise ValueError("--max-frames must be positive")
+        common_reference = common_reference[: args.max_frames]
+    minimum_frames = int(kalibr.get("minimum_frames", 20))
+    if minimum_frames <= 0:
+        raise ValueError("kalibr.minimum_frames must be positive")
+    if len(common_reference) < minimum_frames:
+        raise ValueError(
+            f"only {len(common_reference)} synchronized frames were found; "
+            f"kalibr.minimum_frames is {minimum_frames}. Check time-sync, "
+            "generated EVS coverage, and approximate_sync_s."
+        )
+
+    export_dataset(
+        args.output_dir,
+        cameras,
+        common_reference,
+        matches,
+        reference_sensor=reference_sensor,
+        bag_path=args.bag,
+        image_directories=image_directories,
+        sensor_configs=sensor_configs,
+        target=target_config(config),
+        approximate_sync_s=approximate_sync_s,
+        export_rate_hz=export_rate_hz,
+        time_sync_source=args.time_sync,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multi-sensor-calibration",
@@ -527,6 +677,26 @@ def build_parser() -> argparse.ArgumentParser:
     manual_parser.add_argument("--rpy", type=float, nargs=3, required=True)
     manual_parser.add_argument("--output", required=True)
     manual_parser.set_defaults(function=command_manual_extrinsic)
+
+    kalibr_parser = subparsers.add_parser(
+        "export-kalibr",
+        help="Export synchronized mono8 images for the Kalibr Docker pipeline.",
+    )
+    kalibr_parser.add_argument("--config", required=True)
+    kalibr_parser.add_argument("--bag")
+    kalibr_parser.add_argument("--time-sync", required=True)
+    kalibr_parser.add_argument(
+        "--images-dir",
+        action="append",
+        default=[],
+        metavar="SENSOR=PATH",
+        help="Use generated images for a sensor; may be specified more than once.",
+    )
+    kalibr_parser.add_argument("--rate-hz", type=float)
+    kalibr_parser.add_argument("--max-pair-delta-ms", type=float)
+    kalibr_parser.add_argument("--max-frames", type=int)
+    kalibr_parser.add_argument("--output-dir", required=True)
+    kalibr_parser.set_defaults(function=command_export_kalibr)
 
     return parser
 

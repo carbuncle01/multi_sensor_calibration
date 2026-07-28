@@ -77,3 +77,18 @@ target:
   columns: 8
   rows: 6
   square_size_m: 0.03
+
+# Kalibr camera order is also the camera-chain order. Adjacent cameras must
+# observe the target at common times, so RGB is placed between EVS and Thermal.
+kalibr:
+  reference_sensor: rgb
+  export_rate_hz: 4.0
+  approximate_sync_s: 0.02
+  minimum_frames: 20
+  cameras:
+    - sensor: evs
+      model: pinhole-radtan
+    - sensor: rgb
+      model: pinhole-radtan
+    - sensor: thermal
+      model: pinhole-radtan
