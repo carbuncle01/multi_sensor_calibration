@@ -34,6 +34,10 @@ if(BUILD_TESTING)
     test/test_time_sync.py
   )
   ament_add_pytest_test(
+    test_led_sync_export
+    test/test_led_sync_export.py
+  )
+  ament_add_pytest_test(
     test_kalibr_export
     test/test_kalibr_export.py
   )

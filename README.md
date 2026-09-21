@@ -183,6 +183,34 @@ checkerboardの`columns`と`rows`はsquare数ではなくinner corner数です�
 
 ## 基本ワークフロー
 
+### LED同期GUI用データのexport
+
+RGBとEVSの両方に映したLEDを使う場合、LEDを囲むROIをそれぞれ
+`x,y,width,height`で指定して、ブラウザGUI用の時系列を生成できます。
+RGBは各frameの固定scale輝度、EVSは指定幅ごとの正負event数を出力します。
+
+```bash
+ros2 run multi_sensor_calibration multi-sensor-calibration led-sync-export \
+  --config config/rc_popout_evs_rgb.yaml \
+  --bag /workspaces/record/calibration_bag \
+  --evs-source metavision_file \
+  --event-file /workspaces/record/openeb/calibration.raw \
+  --rgb-roi 100,80,60,60 \
+  --evs-roi 75,70,50,50 \
+  --bin-ms 1 \
+  --output-dir result/led_sync
+```
+
+出力は次の3ファイルです。
+
+- `rgb_led_signal.csv`: `t,rgb`
+- `evs_led_signal.csv`: `t,pos,neg`
+- `led_sync_data.json`: GUIへそのまま読み込める統合データ
+
+時刻`t`は、RGB bag時刻とRAW sidecarのclock anchorを使って同じsession相対時刻へ
+変換されます。`*.raw.metadata.yaml`をRAWの隣に置いてください。ROIは各sensorの
+画像座標なので、RGBとEVSで同じ数値である必要はありません。
+
 ### 1. bagの時刻診断
 
 ```bash

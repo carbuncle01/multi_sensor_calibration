@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -358,6 +359,45 @@ def command_time_sync(args: argparse.Namespace) -> None:
     )
 
 
+def command_led_sync_export(args: argparse.Namespace) -> None:
+    from .evs_sources import build_event_source
+    from .led_sync_export import Roi, export_led_sync_data
+
+    config = load_yaml(args.config)
+    reference_name = str(config.get("reference_sensor", "rgb"))
+    reference = sensor_config(config, reference_name)
+    rgb_topic = reference.get("image_topic")
+    if not rgb_topic:
+        raise ValueError(f"sensors.{reference_name}.image_topic is required")
+
+    evs = _evs_config(config)
+    source_type = args.evs_source or str(evs.get("source", "metavision_file"))
+    if source_type != "metavision_file":
+        raise ValueError(
+            "led-sync-export currently requires --evs-source metavision_file"
+        )
+    source_value = _source_config(evs, source_type)
+    source = build_event_source(
+        source_type,
+        source_value,
+        bag_path=args.bag,
+        event_file=args.event_file,
+    )
+    result = export_led_sync_data(
+        bag_path=args.bag,
+        event_source=source,
+        output_dir=args.output_dir,
+        rgb_topic=str(rgb_topic),
+        rgb_timestamp_source=str(reference.get("timestamp_source", "bag")),
+        rgb_roi=Roi.parse(args.rgb_roi),
+        evs_roi=Roi.parse(args.evs_roi),
+        bin_ms=args.bin_ms,
+        session_name=args.session_name,
+        max_rgb_frames=args.max_rgb_frames,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def command_intrinsics(args: argparse.Namespace) -> None:
     from .intrinsics import calibrate_intrinsics, detect_checkerboard
 
@@ -643,6 +683,35 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--min-correlation", type=float, default=0.1)
     sync_parser.add_argument("--max-frames", type=int)
     sync_parser.set_defaults(function=command_time_sync)
+
+    led_export_parser = subparsers.add_parser(
+        "led-sync-export",
+        help="Export RGB LED brightness and EVS ROI event counts for the browser UI.",
+    )
+    led_export_parser.add_argument("--config", required=True)
+    led_export_parser.add_argument("--bag", required=True)
+    led_export_parser.add_argument(
+        "--evs-source",
+        choices=("metavision_file",),
+    )
+    led_export_parser.add_argument("--event-file")
+    led_export_parser.add_argument(
+        "--rgb-roi",
+        required=True,
+        metavar="X,Y,W,H",
+        help="LED rectangle in the RGB image.",
+    )
+    led_export_parser.add_argument(
+        "--evs-roi",
+        required=True,
+        metavar="X,Y,W,H",
+        help="LED rectangle in the EVS image.",
+    )
+    led_export_parser.add_argument("--bin-ms", type=float, default=1.0)
+    led_export_parser.add_argument("--session-name")
+    led_export_parser.add_argument("--max-rgb-frames", type=int)
+    led_export_parser.add_argument("--output-dir", required=True)
+    led_export_parser.set_defaults(function=command_led_sync_export)
 
     intrinsics_parser = subparsers.add_parser("intrinsics")
     intrinsics_parser.add_argument("--config", required=True)

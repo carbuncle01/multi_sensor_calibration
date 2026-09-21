@@ -6,9 +6,8 @@ import sys
 from typing import Any
 
 
-def decode_ros_image(message: Any, message_type: str):
-    """Decode a ROS Image/CompressedImage into a grayscale float32 array."""
-
+def _decode_ros_image_native(message: Any, message_type: str):
+    """Decode a ROS Image/CompressedImage into a native-range grayscale array."""
     try:
         import cv2
         import numpy as np
@@ -57,11 +56,43 @@ def decode_ros_image(message: Any, message_type: str):
 
     if image.ndim == 3:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return image
+
+
+def decode_ros_image(message: Any, message_type: str):
+    """Decode a ROS Image/CompressedImage into a normalized grayscale array."""
+
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError("NumPy is required for image processing") from exc
+
+    image = _decode_ros_image_native(message, message_type)
     image = image.astype(np.float32)
     low, high = np.percentile(image, (1.0, 99.0))
     if high <= low:
         high = low + 1.0
     return np.clip((image - low) / (high - low), 0.0, 1.0)
+
+
+def decode_ros_image_intensity(message: Any, message_type: str):
+    """Decode an image to fixed-scale [0, 1] intensity without frame normalization.
+
+    Per-frame percentile normalization is useful for feature detection but would
+    suppress an LED's true brightness step.  Temporal synchronization therefore
+    uses the encoding's numeric range instead.
+    """
+
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError("NumPy is required for image processing") from exc
+
+    image = _decode_ros_image_native(message, message_type)
+    if np.issubdtype(image.dtype, np.integer):
+        maximum = float(np.iinfo(image.dtype).max)
+        return image.astype(np.float32) / maximum
+    return np.clip(image.astype(np.float32), 0.0, 1.0)
 
 
 def to_uint8(gray_float):
