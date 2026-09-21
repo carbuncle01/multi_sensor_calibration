@@ -1,0 +1,65 @@
+schema_version: 1
+reference_sensor: rgb
+
+sensors:
+  rgb:
+    image_topic: /realsense/color/image_raw
+    camera_info_topic: /realsense/color/camera_info
+    frame_id: realsense_color_optical_frame
+    # Keep the bag timestamp as the provisional common clock until time-sync
+    # has estimated the residual EVS-to-RGB offset and drift.
+    timestamp_source: bag
+
+  evs:
+    # EVS images are reconstructed from the native Metavision recording.
+    frame_id: event_camera
+
+evs:
+  sensor_name: evs
+  source: metavision_file
+  representation: polarity
+
+  sources:
+    metavision_file:
+      # Supply the recording path with --event-file for each session.
+      path: ""
+      # Keep the *.raw.metadata.yaml sidecar beside the RAW recording.
+      metadata_path: ""
+      chunk_us: 10000
+      source_time_at_anchor_us: 0
+
+    ros_events:
+      topic: /event_camera/events
+      anchor_timestamp_source: header
+
+    ros_event_image:
+      topic: /event_camera/event_image
+      timestamp_source: bag
+
+  window:
+    # Use periodic windows for EVS intrinsic calibration. Change this to
+    # reference_aligned when generating RGB-aligned images for extrinsics.
+    schedule: periodic
+    period_us: 20000
+    accumulation_us: 20000
+    timestamp_policy: center
+    drop_partial_windows: true
+
+target:
+  type: checkerboard
+  # The printed board has 10 x 7 squares and therefore 9 x 6 inner corners.
+  columns: 9
+  rows: 6
+  # Provisional value for pipeline validation; replace with the measured size.
+  square_size_m: 0.025
+
+kalibr:
+  reference_sensor: rgb
+  export_rate_hz: 4.0
+  approximate_sync_s: 0.02
+  minimum_frames: 20
+  cameras:
+    - sensor: evs
+      model: pinhole-radtan
+    - sensor: rgb
+      model: pinhole-radtan
