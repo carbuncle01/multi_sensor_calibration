@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from multi_sensor_calibration.led_sync_export import Roi, _estimate_rate_hz
+from multi_sensor_calibration.led_sync_export import (
+    Roi,
+    _estimate_rate_hz,
+    _preview_ranges,
+)
 
 
 def test_roi_parse() -> None:
@@ -26,3 +30,11 @@ def test_roi_validate() -> None:
 
 def test_estimate_rate_hz_uses_median_delta() -> None:
     assert _estimate_rate_hz([0.0, 1.0 / 60.0, 2.0 / 60.0]) == pytest.approx(60.0)
+
+
+def test_preview_ranges_keep_start_and_end_separate() -> None:
+    assert _preview_ranges(0.0, 100.0, 12.0) == [(0.0, 12.0), (88.0, 100.0)]
+
+
+def test_preview_ranges_merge_for_short_recording() -> None:
+    assert _preview_ranges(0.0, 20.0, 12.0) == [(0.0, 20.0)]

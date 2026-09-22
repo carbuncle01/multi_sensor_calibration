@@ -394,6 +394,8 @@ def command_led_sync_export(args: argparse.Namespace) -> None:
         bin_ms=args.bin_ms,
         session_name=args.session_name,
         max_rgb_frames=args.max_rgb_frames,
+        preview_fps=args.preview_fps,
+        preview_window_s=args.preview_window_s,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -710,6 +712,18 @@ def build_parser() -> argparse.ArgumentParser:
     led_export_parser.add_argument("--bin-ms", type=float, default=1.0)
     led_export_parser.add_argument("--session-name")
     led_export_parser.add_argument("--max-rgb-frames", type=int)
+    led_export_parser.add_argument(
+        "--preview-fps",
+        type=float,
+        default=20.0,
+        help="Preview images per second for the start/end windows; use 0 to disable.",
+    )
+    led_export_parser.add_argument(
+        "--preview-window-s",
+        type=float,
+        default=12.0,
+        help="Seconds exported at both the start and end for visual LED confirmation.",
+    )
     led_export_parser.add_argument("--output-dir", required=True)
     led_export_parser.set_defaults(function=command_led_sync_export)
 

@@ -198,18 +198,24 @@ ros2 run multi_sensor_calibration multi-sensor-calibration led-sync-export \
   --rgb-roi 100,80,60,60 \
   --evs-roi 75,70,50,50 \
   --bin-ms 1 \
+  --preview-fps 20 \
+  --preview-window-s 12 \
   --output-dir result/led_sync
 ```
 
-出力は次の3ファイルです。
+出力は次です。
 
 - `rgb_led_signal.csv`: `t,rgb`
 - `evs_led_signal.csv`: `t,pos,neg`
 - `led_sync_data.json`: GUIへそのまま読み込める統合データ
+- `preview/rgb/*.jpg`: 記録開始・終了付近のRGB確認画像
+- `preview/evs/*.jpg`: 同じ区間の極性event蓄積画像
 
 時刻`t`は、RGB bag時刻とRAW sidecarのclock anchorを使って同じsession相対時刻へ
 変換されます。`*.raw.metadata.yaml`をRAWの隣に置いてください。ROIは各sensorの
 画像座標なので、RGBとEVSで同じ数値である必要はありません。
+previewはGUIでLED位置を確認するためのもので、同期時刻の推定には1 msのEVS信号を
+使用します。previewが不要な処理では`--preview-fps 0`で無効化できます。
 
 ### 1. bagの時刻診断
 

@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .imaging import decode_ros_image_intensity
+from .imaging import decode_ros_image_bgr, decode_ros_image_intensity, render_events
 from .rosbag import iter_messages, selected_time_ns
 
 
@@ -101,6 +101,128 @@ def _rgb_samples(
     return samples, image_size
 
 
+def _preview_ranges(start_s: float, end_s: float, window_s: float) -> list[tuple[float, float]]:
+    """Return non-overlapping start/end ranges in session-relative seconds."""
+
+    if window_s <= 0 or end_s <= start_s:
+        return []
+    first = (start_s, min(end_s, start_s + window_s))
+    last = (max(start_s, end_s - window_s), end_s)
+    if last[0] <= first[1]:
+        return [(start_s, end_s)]
+    return [first, last]
+
+
+def _in_ranges(value: float, ranges: list[tuple[float, float]]) -> bool:
+    return any(low <= value <= high for low, high in ranges)
+
+
+def _write_rgb_previews(
+    *,
+    bag_path: str | Path,
+    topic: str,
+    timestamp_source: str,
+    origin_s: float,
+    end_s: float,
+    destination: Path,
+    preview_fps: float,
+    preview_window_s: float,
+) -> list[dict[str, Any]]:
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("OpenCV is required for preview image export") from exc
+
+    ranges = _preview_ranges(0.0, end_s, preview_window_s)
+    if not ranges or preview_fps <= 0:
+        return []
+    destination.mkdir(parents=True, exist_ok=True)
+    minimum_interval = 1.0 / preview_fps
+    last_saved = float("-inf")
+    rows: list[dict[str, Any]] = []
+    for item in iter_messages(bag_path, {topic}):
+        relative_s = selected_time_ns(item, timestamp_source) / 1_000_000_000.0 - origin_s
+        if not _in_ranges(relative_s, ranges):
+            continue
+        if relative_s - last_saved < minimum_interval * 0.9:
+            continue
+        image = decode_ros_image_bgr(item.message, item.message_type)
+        filename = f"rgb_{len(rows):05d}.jpg"
+        if not cv2.imwrite(str(destination / filename), image, [cv2.IMWRITE_JPEG_QUALITY, 86]):
+            raise RuntimeError(f"failed to write RGB preview {destination / filename}")
+        rows.append({"t": relative_s, "path": f"preview/rgb/{filename}"})
+        last_saved = relative_s
+    return rows
+
+
+def _write_evs_previews(
+    *,
+    source,
+    origin_s: float,
+    end_s: float,
+    destination: Path,
+    preview_fps: float,
+    preview_window_s: float,
+) -> list[dict[str, Any]]:
+    try:
+        import cv2
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError("NumPy and OpenCV are required for preview image export") from exc
+
+    ranges = _preview_ranges(0.0, end_s, preview_window_s)
+    if not ranges or preview_fps <= 0:
+        return []
+    destination.mkdir(parents=True, exist_ok=True)
+    frame_s = 1.0 / preview_fps
+    current_index: int | None = None
+    current_events: list[Any] = []
+    rows: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        nonlocal current_events
+        if current_index is None or not current_events:
+            current_events = []
+            return
+        events = np.concatenate(current_events)
+        image = render_events(events, source.width, source.height, "count")
+        # render_events/count uses red for positive events.  The inspector uses
+        # green for EVS+ and blue for EVS-, matching its timeline legend.
+        image[:, :, 1] = image[:, :, 2]
+        image[:, :, 2] = 0
+        filename = f"evs_{len(rows):05d}.jpg"
+        if not cv2.imwrite(str(destination / filename), image, [cv2.IMWRITE_JPEG_QUALITY, 90]):
+            raise RuntimeError(f"failed to write EVS preview {destination / filename}")
+        rows.append(
+            {
+                "t": (current_index + 0.5) * frame_s,
+                "path": f"preview/evs/{filename}",
+            }
+        )
+        current_events = []
+
+    for batch in source.batches():
+        events = batch.events
+        reference_times_s = (
+            source.anchor.reference_time_s
+            + source.anchor.scale
+            * (events["t"].astype(np.float64) - source.anchor.source_time_us)
+            / 1_000_000.0
+            - origin_s
+        )
+        selected = np.zeros(len(events), dtype=bool)
+        for low, high in ranges:
+            selected |= (reference_times_s >= low) & (reference_times_s <= high)
+        for index in np.unique(np.floor(reference_times_s[selected] / frame_s).astype(np.int64)):
+            if current_index is not None and int(index) != current_index:
+                flush()
+            current_index = int(index)
+            mask = selected & (np.floor(reference_times_s / frame_s).astype(np.int64) == index)
+            current_events.append(events[mask].copy())
+    flush()
+    return rows
+
+
 def _evs_bin_counts(
     source,
     roi: Roi,
@@ -173,6 +295,8 @@ def export_led_sync_data(
     bin_ms: float = 1.0,
     session_name: str | None = None,
     max_rgb_frames: int | None = None,
+    preview_fps: float = 20.0,
+    preview_window_s: float = 12.0,
 ) -> dict[str, Any]:
     if bin_ms <= 0.0:
         raise ValueError("--bin-ms must be positive")
@@ -225,8 +349,37 @@ def export_led_sync_data(
     _write_csv(evs_csv, ["t", "pos", "neg"], evs_rows)
 
     rgb_times_relative = [timestamp_s - origin_s for timestamp_s, _ in rgb_absolute]
+    preview: dict[str, Any] | None = None
+    if preview_fps > 0.0 and preview_window_s > 0.0:
+        session_end_s = max(rgb_times_relative[-1], (last_bin + 1) * bin_width_s)
+        rgb_preview = _write_rgb_previews(
+            bag_path=bag_path,
+            topic=rgb_topic,
+            timestamp_source=rgb_timestamp_source,
+            origin_s=origin_s,
+            end_s=session_end_s,
+            destination=destination / "preview" / "rgb",
+            preview_fps=preview_fps,
+            preview_window_s=preview_window_s,
+        )
+        evs_preview = _write_evs_previews(
+            source=event_source,
+            origin_s=origin_s,
+            end_s=session_end_s,
+            destination=destination / "preview" / "evs",
+            preview_fps=preview_fps,
+            preview_window_s=preview_window_s,
+        )
+        preview = {
+            "fps": preview_fps,
+            "window_s": preview_window_s,
+            "evs_accumulation_ms": 1000.0 / preview_fps,
+            "rgb": rgb_preview,
+            "evs": evs_preview,
+        }
+
     data = {
-        "schema_version": 1,
+        "schema_version": 2,
         "meta": {
             "session": session_name or Path(bag_path).name,
             "rgbFps": _estimate_rate_hz(rgb_times_relative),
@@ -261,6 +414,8 @@ def export_led_sync_data(
             for index in range(first_bin, last_bin + 1)
         ],
     }
+    if preview is not None:
+        data["preview"] = preview
     _write_json(json_path, data)
 
     return {
@@ -271,4 +426,6 @@ def export_led_sync_data(
         "evs_bins": len(evs_rows),
         "evs_events_in_roi": selected_event_count,
         "time_origin_reference_s": origin_s,
+        "rgb_preview_frames": len(preview["rgb"]) if preview else 0,
+        "evs_preview_frames": len(preview["evs"]) if preview else 0,
     }

@@ -95,6 +95,55 @@ def decode_ros_image_intensity(message: Any, message_type: str):
     return np.clip(image.astype(np.float32), 0.0, 1.0)
 
 
+def decode_ros_image_bgr(message: Any, message_type: str):
+    """Decode a ROS image into an 8-bit BGR image for human inspection."""
+
+    try:
+        import cv2
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError("NumPy and OpenCV are required for image processing") from exc
+
+    data_bytes = bytes(message.data)
+    if message_type.endswith("/CompressedImage"):
+        encoded = np.frombuffer(data_bytes, dtype=np.uint8)
+        image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError("failed to decode CompressedImage")
+        return image
+
+    width = int(message.width)
+    height = int(message.height)
+    step = int(message.step)
+    encoding = str(message.encoding).lower()
+    if encoding in {"bgr8", "rgb8"}:
+        row_bytes = width * 3
+        image = np.frombuffer(data_bytes, dtype=np.uint8).reshape(
+            height, step
+        )[:, :row_bytes].reshape(height, width, 3)
+        return image.copy() if encoding == "bgr8" else cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    if encoding in {"bgra8", "rgba8"}:
+        row_bytes = width * 4
+        image = np.frombuffer(data_bytes, dtype=np.uint8).reshape(
+            height, step
+        )[:, :row_bytes].reshape(height, width, 4)
+        conversion = cv2.COLOR_BGRA2BGR if encoding == "bgra8" else cv2.COLOR_RGBA2BGR
+        return cv2.cvtColor(image, conversion)
+
+    gray = _decode_ros_image_native(message, message_type)
+    if gray.dtype != np.uint8:
+        if np.issubdtype(gray.dtype, np.integer):
+            gray = np.clip(
+                gray.astype(np.float32) / np.iinfo(gray.dtype).max * 255.0,
+                0,
+                255,
+            ).astype(np.uint8)
+        else:
+            gray = np.clip(gray, 0.0, 1.0)
+            gray = (gray * 255.0).astype(np.uint8)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
 def to_uint8(gray_float):
     try:
         import numpy as np
