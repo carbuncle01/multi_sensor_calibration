@@ -1,0 +1,62 @@
+schema_version: 1
+reference_sensor: rgb
+
+sensors:
+  rgb:
+    image_topic: /realsense/color/image_raw
+    camera_info_topic: /realsense/color/camera_info
+    frame_id: realsense_color_optical_frame
+    timestamp_source: bag
+
+  evs:
+    frame_id: event_camera
+
+evs:
+  sensor_name: evs
+  source: metavision_file
+  representation: e2v
+
+  sources:
+    metavision_file:
+      path: ""
+      metadata_path: ""
+      chunk_us: 10000
+      source_time_at_anchor_us: 0
+
+    ros_events:
+      topic: /event_camera/events
+      anchor_timestamp_source: header
+
+    ros_event_image:
+      topic: /event_camera/event_image
+      timestamp_source: bag
+
+  e2v:
+    checkpoint_path: /opt/openeb/sdk/modules/core_ml/models/e2v.ckpt
+    device: auto
+    warmup_frames: 5
+    normalize_num_stds: 6.0
+
+  window:
+    schedule: reference_aligned
+    period_us: 20000
+    accumulation_us: 20000
+    timestamp_policy: end
+    drop_partial_windows: true
+
+target:
+  type: checkerboard
+  columns: 9
+  rows: 6
+  square_size_m: 0.025
+
+kalibr:
+  reference_sensor: rgb
+  export_rate_hz: 4.0
+  approximate_sync_s: 0.02
+  minimum_frames: 20
+  cameras:
+    - sensor: evs
+      model: pinhole-radtan
+    - sensor: rgb
+      model: pinhole-radtan
