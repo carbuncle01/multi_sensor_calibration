@@ -396,6 +396,8 @@ def command_led_sync_export(args: argparse.Namespace) -> None:
         max_rgb_frames=args.max_rgb_frames,
         preview_fps=args.preview_fps,
         preview_window_s=args.preview_window_s,
+        roi_tile_size=args.roi_tile_size,
+        export_roi_data=not args.no_roi_data,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -715,7 +717,7 @@ def build_parser() -> argparse.ArgumentParser:
     led_export_parser.add_argument(
         "--preview-fps",
         type=float,
-        default=20.0,
+        default=60.0,
         help="Preview images per second for the start/end windows; use 0 to disable.",
     )
     led_export_parser.add_argument(
@@ -723,6 +725,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=12.0,
         help="Seconds exported at both the start and end for visual LED confirmation.",
+    )
+    led_export_parser.add_argument(
+        "--roi-tile-size",
+        type=int,
+        default=16,
+        help="Tile size used for browser-side dynamic ROI recalculation.",
+    )
+    led_export_parser.add_argument(
+        "--no-roi-data",
+        action="store_true",
+        help="Do not export browser-side dynamic ROI data.",
     )
     led_export_parser.add_argument("--output-dir", required=True)
     led_export_parser.set_defaults(function=command_led_sync_export)

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import statistics
+import struct
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -223,6 +225,153 @@ def _write_evs_previews(
     return rows
 
 
+def _tile_means_u8(image, tile_size: int):
+    """Return row-major uint8 tile means without retaining full RGB frames."""
+
+    import numpy as np
+
+    height, width = image.shape[:2]
+    grid_width = math.ceil(width / tile_size)
+    grid_height = math.ceil(height / tile_size)
+    values = np.empty(grid_width * grid_height, dtype=np.uint8)
+    index = 0
+    for tile_y in range(grid_height):
+        y0 = tile_y * tile_size
+        y1 = min(height, y0 + tile_size)
+        for tile_x in range(grid_width):
+            x0 = tile_x * tile_size
+            x1 = min(width, x0 + tile_size)
+            values[index] = int(round(float(image[y0:y1, x0:x1].mean())))
+            index += 1
+    return values, grid_width, grid_height
+
+
+def _write_rgb_spatial_data(
+    *,
+    bag_path: str | Path,
+    topic: str,
+    timestamp_source: str,
+    origin_s: float,
+    end_s: float,
+    destination: Path,
+    window_s: float,
+    tile_size: int,
+) -> dict[str, Any]:
+    ranges = _preview_ranges(0.0, end_s, window_s)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    frames = 0
+    grid_width = grid_height = 0
+    with temporary.open("wb") as stream:
+        for item in iter_messages(bag_path, {topic}):
+            relative_s = (
+                selected_time_ns(item, timestamp_source) / 1_000_000_000.0
+                - origin_s
+            )
+            if not _in_ranges(relative_s, ranges):
+                continue
+            image = decode_ros_image_intensity(item.message, item.message_type)
+            tiles, width_tiles, height_tiles = _tile_means_u8(image, tile_size)
+            if frames and (width_tiles, height_tiles) != (grid_width, grid_height):
+                raise ValueError("RGB image size changed during spatial export")
+            grid_width, grid_height = width_tiles, height_tiles
+            stream.write(struct.pack("<d", relative_s))
+            stream.write(tiles.tobytes())
+            frames += 1
+    temporary.replace(destination)
+    return {
+        "path": "roi_data/rgb_tiles.bin",
+        "encoding": "float64_time_then_uint8_tile_means_le",
+        "tile_size": tile_size,
+        "grid_width": grid_width,
+        "grid_height": grid_height,
+        "frame_count": frames,
+        "record_bytes": 8 + grid_width * grid_height,
+        "ranges": ranges,
+    }
+
+
+def _write_evs_spatial_data(
+    *,
+    source,
+    origin_s: float,
+    end_s: float,
+    destination: Path,
+    window_s: float,
+    tile_size: int,
+    bin_width_s: float,
+) -> dict[str, Any]:
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError("NumPy is required for EVS spatial export") from exc
+
+    ranges = _preview_ranges(0.0, end_s, window_s)
+    grid_width = math.ceil(source.width / tile_size)
+    grid_height = math.ceil(source.height / tile_size)
+    tile_count = grid_width * grid_height
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    record_count = 0
+    with temporary.open("wb") as stream:
+        for batch in source.batches():
+            events = batch.events
+            relative_s = (
+                source.anchor.reference_time_s
+                + source.anchor.scale
+                * (events["t"].astype(np.float64) - source.anchor.source_time_us)
+                / 1_000_000.0
+                - origin_s
+            )
+            selected = np.zeros(len(events), dtype=bool)
+            for low, high in ranges:
+                selected |= (relative_s >= low) & (relative_s <= high)
+            if not selected.any():
+                continue
+            selected_events = events[selected]
+            selected_times = relative_s[selected]
+            bins = np.floor(selected_times / bin_width_s).astype(np.int64)
+            tiles = (
+                (selected_events["y"].astype(np.int64) // tile_size) * grid_width
+                + selected_events["x"].astype(np.int64) // tile_size
+            )
+            polarities = (selected_events["p"] <= 0).astype(np.int64)
+            keys = bins * (tile_count * 2) + tiles * 2 + polarities
+            unique, frequencies = np.unique(keys, return_counts=True)
+            batch_counts: dict[tuple[int, int], list[int]] = {}
+            for key, frequency in zip(unique.tolist(), frequencies.tolist()):
+                bin_index = int(key // (tile_count * 2))
+                remainder = int(key % (tile_count * 2))
+                tile_index = remainder // 2
+                polarity_index = remainder % 2
+                value = batch_counts.setdefault((bin_index, tile_index), [0, 0])
+                value[polarity_index] += int(frequency)
+            for (bin_index, tile_index), (positive, negative) in sorted(batch_counts.items()):
+                stream.write(
+                    struct.pack(
+                        "<IHHHH",
+                        bin_index,
+                        tile_index,
+                        min(positive, 65535),
+                        min(negative, 65535),
+                        0,
+                    )
+                )
+                record_count += 1
+    temporary.replace(destination)
+    return {
+        "path": "roi_data/evs_tiles.bin",
+        "encoding": "uint32_bin_uint16_tile_pos_neg_reserved_le",
+        "tile_size": tile_size,
+        "grid_width": grid_width,
+        "grid_height": grid_height,
+        "record_count": record_count,
+        "record_bytes": 12,
+        "bin_ms": bin_width_s * 1000.0,
+        "ranges": ranges,
+    }
+
+
 def _evs_bin_counts(
     source,
     roi: Roi,
@@ -295,11 +444,15 @@ def export_led_sync_data(
     bin_ms: float = 1.0,
     session_name: str | None = None,
     max_rgb_frames: int | None = None,
-    preview_fps: float = 20.0,
+    preview_fps: float = 60.0,
     preview_window_s: float = 12.0,
+    roi_tile_size: int = 16,
+    export_roi_data: bool = True,
 ) -> dict[str, Any]:
     if bin_ms <= 0.0:
         raise ValueError("--bin-ms must be positive")
+    if roi_tile_size <= 0 or roi_tile_size > 128:
+        raise ValueError("--roi-tile-size must be between 1 and 128")
     if event_source.anchor is None:
         raise ValueError(
             "EVS source has no clock anchor; check the RAW metadata sidecar"
@@ -349,9 +502,9 @@ def export_led_sync_data(
     _write_csv(evs_csv, ["t", "pos", "neg"], evs_rows)
 
     rgb_times_relative = [timestamp_s - origin_s for timestamp_s, _ in rgb_absolute]
+    session_end_s = max(rgb_times_relative[-1], (last_bin + 1) * bin_width_s)
     preview: dict[str, Any] | None = None
     if preview_fps > 0.0 and preview_window_s > 0.0:
-        session_end_s = max(rgb_times_relative[-1], (last_bin + 1) * bin_width_s)
         rgb_preview = _write_rgb_previews(
             bag_path=bag_path,
             topic=rgb_topic,
@@ -378,8 +531,32 @@ def export_led_sync_data(
             "evs": evs_preview,
         }
 
+    roi_data: dict[str, Any] | None = None
+    if export_roi_data and preview_window_s > 0.0:
+        roi_data = {
+            "rgb": _write_rgb_spatial_data(
+                bag_path=bag_path,
+                topic=rgb_topic,
+                timestamp_source=rgb_timestamp_source,
+                origin_s=origin_s,
+                end_s=session_end_s,
+                destination=destination / "roi_data" / "rgb_tiles.bin",
+                window_s=preview_window_s,
+                tile_size=roi_tile_size,
+            ),
+            "evs": _write_evs_spatial_data(
+                source=event_source,
+                origin_s=origin_s,
+                end_s=session_end_s,
+                destination=destination / "roi_data" / "evs_tiles.bin",
+                window_s=preview_window_s,
+                tile_size=roi_tile_size,
+                bin_width_s=bin_width_s,
+            ),
+        }
+
     data = {
-        "schema_version": 2,
+        "schema_version": 3,
         "meta": {
             "session": session_name or Path(bag_path).name,
             "rgbFps": _estimate_rate_hz(rgb_times_relative),
@@ -416,6 +593,8 @@ def export_led_sync_data(
     }
     if preview is not None:
         data["preview"] = preview
+    if roi_data is not None:
+        data["roi_data"] = roi_data
     _write_json(json_path, data)
 
     return {
@@ -428,4 +607,6 @@ def export_led_sync_data(
         "time_origin_reference_s": origin_s,
         "rgb_preview_frames": len(preview["rgb"]) if preview else 0,
         "evs_preview_frames": len(preview["evs"]) if preview else 0,
+        "rgb_roi_frames": roi_data["rgb"]["frame_count"] if roi_data else 0,
+        "evs_roi_records": roi_data["evs"]["record_count"] if roi_data else 0,
     }
