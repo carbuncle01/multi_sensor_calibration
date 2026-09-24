@@ -1,6 +1,11 @@
 schema_version: 1
 reference_sensor: rgb
 
+calibration:
+  default_profile: calibrations/rc_popout_default/profile.yaml
+  spatial_camchain: calibrations/rc_popout_default/kalibr-camchain.yaml
+  temporal_policy: estimate_or_verify_from_session_led
+
 sensors:
   rgb:
     image_topic: /realsense/color/image_raw

@@ -1,0 +1,68 @@
+schema_version: 1
+profile_id: rc_popout_d455_silkyevcam_default
+status: default
+created_from_recording: >-
+  evs-popup-v1/20260921_185407_rcp_calibration_checkerboard_20260921_185405
+calibrated_at: "2026-09-24"
+
+sensors:
+  evs:
+    role: cam0
+    model: SilkyEvCam
+    resolution: [640, 480]
+    bias_profile: device_default
+  rgb:
+    role: cam1
+    model: Intel RealSense D455
+    resolution: [848, 480]
+    frame_rate_hz: 60
+
+target:
+  type: checkerboard
+  inner_corners: [9, 6]
+  square_size_m: 0.025
+
+artifacts:
+  spatial_calibration: kalibr-camchain.yaml
+  temporal_reference: time-sync-reference.yaml
+
+transform:
+  convention: T_rgb_evs_maps_cam0_evs_coordinates_into_cam1_rgb_coordinates
+  translation_m:
+    - -0.011825999123695167
+    - -0.03918200679141161
+    - -0.010131846334277687
+  baseline_m: 0.04216323305460909
+  relative_rotation_deg: 0.8181332131341752
+
+quality:
+  evs_reprojection_error_px:
+    mean_xy: [-0.000089, -0.000490]
+    std_xy: [0.476599, 0.446630]
+  rgb_reprojection_error_px:
+    mean_xy: [-0.000125, -0.000329]
+    std_xy: [0.349634, 0.310086]
+  temporal_reference:
+    offset_rgb_to_evs_ms: 35.1286525176092
+    drift_ppm: 54.6399967720574
+    residual_rms_ms: 10.5657089894015
+    matched_edges: 52
+
+reuse_policy:
+  spatial:
+    reusable: true
+    requirements:
+      - EVS and RGB mount pose has not changed.
+      - EVS remains at 640x480 with the same lens/focus.
+      - RGB remains at 848x480 with the same lens/focus and image pipeline.
+  temporal:
+    reusable: false
+    reason: >-
+      Software/recording clock offset and drift can change between sessions.
+      Use each recording's start/end LED pattern to estimate or verify them.
+  projection:
+    note: >-
+      Extrinsics are reusable, but mapping RGB and EVS pixels still requires a
+      scene-depth assumption. Checkerboard-plane homography is valid only on
+      that plane; pop-out scenes should use a declared fixed-depth/plane model,
+      a rotation-only DSEC-like preview, or measured depth.

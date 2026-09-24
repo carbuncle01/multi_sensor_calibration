@@ -1,0 +1,30 @@
+# Reference result from the checkerboard calibration recording.  This file is
+# retained for provenance and regression checks; estimate/verify time sync for
+# each recording session from its start/end LED pattern instead of treating
+# this as a universal runtime offset.
+schema_version: 1
+reference_sensor: rgb
+method: known_led_pattern_alignment
+models:
+  rgb:
+    anchor_sensor_time_s: 1789984564.48879
+    offset_at_anchor_s: 0.0
+    drift: 0.0
+    correlation: 1.0
+    window_count: 52
+    bin_width_s: 0.0167198181152344
+  evs:
+    anchor_sensor_time_s: 1789984564.48879
+    offset_at_anchor_s: 0.0351286525176092
+    drift: 0.0000546399967720574
+    correlation: 0.0
+    window_count: 52
+    bin_width_s: 0.001
+quality:
+  residual_rms_s: 0.0105657089894015
+  matched_edges: 52
+  drift_ppm: 54.6399967720574
+  led_pattern_used: true
+reuse_policy:
+  spatial_calibration: not_applicable
+  temporal_calibration: reference_only_verify_per_session

@@ -413,6 +413,11 @@ Docker内では`kalibr_bagcreater`によるROS 1 bag生成と
 
 ### EVS–RGB空間校正の重畳確認
 
+RCカー飛び出し実験で使用する既定のD455 + SilkyEvCam空間校正は
+`config/calibrations/rc_popout_default/`に保存しています。固定マウントを変更せず、
+EVS 640x480・RGB 848x480の撮影条件を維持する場合に再利用できます。時刻同期は
+セッションごとにLED記録から確認してください。
+
 Kalibr結果と書き出し済みdatasetから、RGB画像上へEVSを半透明投影した確認動画を
 生成できます。カメラ間には並進があるため、全深度へ通用する単一homographyは存在
 しません。このコマンドは各RGB画像でcheckerboard姿勢を推定し、その平面上だけで
