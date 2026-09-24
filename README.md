@@ -426,10 +426,28 @@ ros2 run multi_sensor_calibration multi-sensor-calibration calibration-overlay \
   --output-dir result/calibration_overlay
 ```
 
+Metavision RAWを指定すると、LEDで推定した`time_sync.yaml`を使って各RGB時刻へ
+RAWイベントを対応付け、正極性を青、負極性を赤で追加表示できます。既定ではRGB時刻を
+中心とした10 msを蓄積します。
+
+```bash
+ros2 run multi_sensor_calibration multi-sensor-calibration calibration-overlay \
+  --dataset result/kalibr_dataset \
+  --camchain result/kalibr_output/kalibr-camchain.yaml \
+  --event-file recording/openeb_camera.raw \
+  --event-window-ms 10 \
+  --event-window-position center \
+  --event-dilate-px 1 \
+  --alpha 0.8 \
+  --output-dir result/calibration_overlay_polarity
+```
+
 生成物:
 
 - `overlay_blend.mp4`: RGBと色付きEVSグレースケールの半透明合成
 - `overlay_edges.mp4`: RGB上へEVS edgeをcyanで重畳
+- `overlay_polarity.mp4`: RGB上へRAWイベントを青（正）・赤（負）で重畳
+- `polarity_only.mp4`: RAWイベントだけを白背景へ青（正）・赤（負）で描画
 - `snapshots/`: 記録全体から抽出した確認用PNG
 - `summary.yaml`: 検出数とcheckerboard cornerの整合誤差
 

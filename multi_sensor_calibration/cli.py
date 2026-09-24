@@ -652,6 +652,10 @@ def command_calibration_overlay(args: argparse.Namespace) -> None:
         fps=args.fps,
         every_n=args.every_n,
         max_frames=args.max_frames,
+        event_file=args.event_file,
+        event_window_ms=args.event_window_ms,
+        event_window_position=args.event_window_position,
+        event_dilate_px=args.event_dilate_px,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
@@ -823,6 +827,28 @@ def build_parser() -> argparse.ArgumentParser:
     overlay_parser.add_argument("--fps", type=float)
     overlay_parser.add_argument("--every-n", type=int, default=1)
     overlay_parser.add_argument("--max-frames", type=int)
+    overlay_parser.add_argument(
+        "--event-file",
+        help="Optional Metavision RAW/HDF5 file for red/blue polarity overlays.",
+    )
+    overlay_parser.add_argument(
+        "--event-window-ms",
+        type=float,
+        default=10.0,
+        help="RAW-event accumulation width in milliseconds (default: 10).",
+    )
+    overlay_parser.add_argument(
+        "--event-window-position",
+        choices=("before", "center", "after"),
+        default="center",
+        help="Place the event window before, around, or after the RGB timestamp.",
+    )
+    overlay_parser.add_argument(
+        "--event-dilate-px",
+        type=int,
+        default=1,
+        help="Optional event-dot dilation size in output pixels (default: 1).",
+    )
     overlay_parser.add_argument("--output-dir", required=True)
     overlay_parser.set_defaults(function=command_calibration_overlay)
 

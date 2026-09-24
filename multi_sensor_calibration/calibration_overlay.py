@@ -167,6 +167,140 @@ def _edge_overlay(base, warped, valid, alpha: float, cv2, np):
     return result
 
 
+def _camera_sensor(job: dict[str, Any], camera_name: str) -> str:
+    cameras = job.get("cameras")
+    if not isinstance(cameras, list):
+        raise ValueError("job.yaml does not contain a cameras list")
+    for camera in cameras:
+        if isinstance(camera, dict) and str(camera.get("camera")) == camera_name:
+            sensor = camera.get("sensor")
+            if sensor:
+                return str(sensor)
+    raise ValueError(f"job.yaml does not map {camera_name} to a sensor")
+
+
+def _raw_polarity_frames(
+    event_file: str | Path,
+    dataset: Path,
+    job: dict[str, Any],
+    pairs,
+    evs_camera: str,
+    window_ms: float,
+    window_position: str,
+):
+    """Yield polarity images centered before/on/after each RGB reference time."""
+
+    from .event_windows import (
+        WindowDefinition,
+        reference_aligned_window_ends,
+    )
+    from .evs_pipeline import generate_event_frames
+    from .evs_sources import MetavisionFileSource
+    from .io import load_yaml
+    from .models import ClockEstimate
+
+    if window_ms <= 0.0:
+        raise ValueError("event window must be positive")
+    if window_position not in {"before", "center", "after"}:
+        raise ValueError("event window position must be before, center, or after")
+
+    event_path = Path(event_file).resolve()
+    if not event_path.is_file():
+        raise FileNotFoundError(f"EVS RAW file not found: {event_path}")
+    sync_value = job.get("time_sync", "time_sync.yaml")
+    sync_path = (dataset / str(sync_value)).resolve()
+    if not sync_path.is_file():
+        raise FileNotFoundError(f"time-sync result not found: {sync_path}")
+    sync = load_yaml(sync_path)
+    models = sync.get("models")
+    if not isinstance(models, dict):
+        raise ValueError(f"{sync_path} does not contain clock models")
+    sensor_name = _camera_sensor(job, evs_camera)
+    model_value = models.get(sensor_name)
+    if not isinstance(model_value, dict):
+        raise ValueError(f"time-sync result has no model for {sensor_name}")
+    clock = ClockEstimate.from_dict(model_value)
+
+    accumulation_us = int(round(window_ms * 1000.0))
+    policy = {"before": "end", "center": "center", "after": "start"}[
+        window_position
+    ]
+    definition = WindowDefinition(
+        accumulation_us=accumulation_us,
+        timestamp_policy=policy,
+        schedule="reference_aligned",
+        drop_partial_windows=True,
+    )
+    source = MetavisionFileSource(
+        event_path,
+        chunk_us=max(1_000, min(10_000, accumulation_us)),
+    )
+    if source.anchor is None:
+        raise ValueError(
+            "EVS RAW sidecar metadata is required to map events onto RGB time"
+        )
+
+    def reference_to_event_time(reference_time_s: float) -> float:
+        provisional_reference_s = clock.inverse(reference_time_s)
+        return source.anchor.to_source_us(provisional_reference_s) / 1_000_000.0
+
+    reference_times = [timestamp_ns / 1_000_000_000.0 for timestamp_ns, _, _ in pairs]
+    end_times_us = reference_aligned_window_ends(
+        reference_times,
+        reference_to_event_time=reference_to_event_time,
+        definition=definition,
+    )
+    return generate_event_frames(
+        source,
+        definition,
+        end_times_us=end_times_us,
+        representation="polarity",
+    )
+
+
+def _polarity_images(
+    polarity,
+    map0,
+    homography,
+    output_size,
+    dilate_px: int,
+    cv2,
+    np,
+):
+    """Warp positive/negative masks and return white and transparent renderings."""
+
+    positive = (polarity == 255).astype("uint8") * 255
+    negative = (polarity == 0).astype("uint8") * 255
+    positive = cv2.remap(positive, map0[0], map0[1], cv2.INTER_NEAREST)
+    negative = cv2.remap(negative, map0[0], map0[1], cv2.INTER_NEAREST)
+    positive = cv2.warpPerspective(
+        positive, homography, output_size, flags=cv2.INTER_NEAREST
+    )
+    negative = cv2.warpPerspective(
+        negative, homography, output_size, flags=cv2.INTER_NEAREST
+    )
+    if dilate_px > 1:
+        kernel = np.ones((dilate_px, dilate_px), dtype="uint8")
+        positive = cv2.dilate(positive, kernel)
+        negative = cv2.dilate(negative, kernel)
+
+    event_only = np.full((output_size[1], output_size[0], 3), 255, dtype="uint8")
+    # OpenCV uses BGR: positive events are blue and negative events are red.
+    event_only[positive > 0] = (255, 0, 0)
+    event_only[negative > 0] = (0, 0, 255)
+    return event_only, (positive > 0) | (negative > 0)
+
+
+def _polarity_overlay(base, event_only, event_mask, alpha: float, cv2, np):
+    result = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+    result[event_mask] = np.clip(
+        (1.0 - alpha) * result[event_mask] + alpha * event_only[event_mask],
+        0,
+        255,
+    ).astype("uint8")
+    return result
+
+
 def _annotate(image, text: str, cv2):
     cv2.rectangle(image, (0, 0), (min(image.shape[1], 560), 31), (0, 0, 0), -1)
     cv2.putText(
@@ -192,6 +326,10 @@ def render_calibration_overlay(
     fps: float | None = None,
     every_n: int = 1,
     max_frames: int | None = None,
+    event_file: str | Path | None = None,
+    event_window_ms: float = 10.0,
+    event_window_position: str = "center",
+    event_dilate_px: int = 1,
 ) -> dict[str, Any]:
     if not 0.0 <= alpha <= 1.0:
         raise ValueError("alpha must be between 0 and 1")
@@ -199,6 +337,8 @@ def render_calibration_overlay(
         raise ValueError("every_n must be positive")
     if max_frames is not None and max_frames <= 0:
         raise ValueError("max_frames must be positive")
+    if event_dilate_px <= 0:
+        raise ValueError("event_dilate_px must be positive")
     try:
         import cv2
         import numpy as np
@@ -258,6 +398,34 @@ def render_calibration_overlay(
         edge_writer.release()
         shutil.rmtree(staging, ignore_errors=True)
         raise RuntimeError("OpenCV could not open the MP4 video writer")
+    polarity_writer = None
+    polarity_only_writer = None
+    polarity_frames = None
+    if event_file is not None:
+        polarity_writer = cv2.VideoWriter(
+            str(staging / "overlay_polarity.mp4"), fourcc, rate, rgb["size"]
+        )
+        polarity_only_writer = cv2.VideoWriter(
+            str(staging / "polarity_only.mp4"), fourcc, rate, rgb["size"]
+        )
+        if not polarity_writer.isOpened() or not polarity_only_writer.isOpened():
+            blend_writer.release()
+            edge_writer.release()
+            polarity_writer.release()
+            polarity_only_writer.release()
+            shutil.rmtree(staging, ignore_errors=True)
+            raise RuntimeError("OpenCV could not open the polarity MP4 writers")
+        polarity_frames = iter(
+            _raw_polarity_frames(
+                event_file,
+                dataset,
+                job,
+                pairs,
+                evs_camera,
+                event_window_ms,
+                event_window_position,
+            )
+        )
 
     map0 = cv2.initUndistortRectifyMap(
         evs["matrix"], evs["distortion"], None, evs["matrix"], evs["size"], cv2.CV_32FC1
@@ -276,6 +444,14 @@ def render_calibration_overlay(
     try:
         try:
             for pair_index, (timestamp_ns, evs_path, rgb_path) in enumerate(pairs):
+                polarity_frame = None
+                if polarity_frames is not None:
+                    try:
+                        polarity_frame = next(polarity_frames)
+                    except StopIteration as exc:
+                        raise ValueError(
+                            "EVS RAW recording ended before all selected RGB frames"
+                        ) from exc
                 evs_image = cv2.imread(str(evs_path), cv2.IMREAD_GRAYSCALE)
                 rgb_image = cv2.imread(str(rgb_path), cv2.IMREAD_GRAYSCALE)
                 if evs_image is None or rgb_image is None:
@@ -363,6 +539,37 @@ def render_calibration_overlay(
                 )
                 blend_writer.write(blend)
                 edge_writer.write(edge)
+                if polarity_frame is not None:
+                    polarity = polarity_frame.image
+                    if (polarity.shape[1], polarity.shape[0]) != evs["size"]:
+                        raise ValueError(
+                            "EVS RAW dimensions do not match the calibrated EVS camera"
+                        )
+                    event_only, event_mask = _polarity_images(
+                        polarity,
+                        map0,
+                        homography,
+                        rgb["size"],
+                        event_dilate_px,
+                        cv2,
+                        np,
+                    )
+                    polarity_overlay = _polarity_overlay(
+                        rgb_undistorted,
+                        event_only,
+                        event_mask,
+                        alpha,
+                        cv2,
+                        np,
+                    )
+                    polarity_text = (
+                        f"RAW events +blue/-red  {event_window_ms:g}ms "
+                        f"{event_window_position}  t={seconds:.3f}s"
+                    )
+                    _annotate(polarity_overlay, polarity_text, cv2)
+                    _annotate(event_only, polarity_text, cv2)
+                    polarity_writer.write(polarity_overlay)
+                    polarity_only_writer.write(event_only)
                 if pair_index in snapshot_indices:
                     cv2.imwrite(
                         str(snapshot_dir / f"{timestamp_ns}_blend.png"), blend
@@ -370,10 +577,23 @@ def render_calibration_overlay(
                     cv2.imwrite(
                         str(snapshot_dir / f"{timestamp_ns}_edges.png"), edge
                     )
+                    if polarity_frame is not None:
+                        cv2.imwrite(
+                            str(snapshot_dir / f"{timestamp_ns}_polarity.png"),
+                            polarity_overlay,
+                        )
+                        cv2.imwrite(
+                            str(snapshot_dir / f"{timestamp_ns}_polarity_only.png"),
+                            event_only,
+                        )
                 rendered += 1
         finally:
             blend_writer.release()
             edge_writer.release()
+            if polarity_writer is not None:
+                polarity_writer.release()
+            if polarity_only_writer is not None:
+                polarity_only_writer.release()
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -395,6 +615,19 @@ def render_calibration_overlay(
         "rgb_checkerboard_detections": detected_rgb,
         "dual_checkerboard_detections": detected_both,
         "rendered_frames": rendered,
+        "raw_polarity": (
+            {
+                "event_file": str(Path(event_file).resolve()),
+                "window_ms": float(event_window_ms),
+                "window_position": event_window_position,
+                "positive_color": "blue",
+                "negative_color": "red",
+                "dilate_px": int(event_dilate_px),
+                "outputs": ["overlay_polarity.mp4", "polarity_only.mp4"],
+            }
+            if event_file is not None
+            else None
+        ),
         "corner_alignment_px": {
             "count": int(error_array.size),
             "mean": float(error_array.mean()) if error_array.size else None,
