@@ -402,6 +402,35 @@ def command_led_sync_export(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def command_auto_led_sync(args: argparse.Namespace) -> None:
+    from .led_sync_auto import auto_led_sync
+
+    time_sync, result = auto_led_sync(args.data_json)
+    write_yaml(args.output_yaml, time_sync)
+    result_path = Path(args.output_json)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = result_path.with_suffix(result_path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary.replace(result_path)
+    print(
+        json.dumps(
+            {
+                "time_sync": str(Path(args.output_yaml).resolve()),
+                "result": str(result_path.resolve()),
+                "overall_confidence": result["overall_confidence"],
+                "matched_edges": result["clock"]["matched_edges"],
+                "offset_ms": result["clock"]["offset_at_anchor_s"] * 1000.0,
+                "drift_ppm": result["clock"]["drift_ppm"],
+                "residual_rms_ms": result["clock"]["residual_rms_s"] * 1000.0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 def command_intrinsics(args: argparse.Namespace) -> None:
     from .intrinsics import calibrate_intrinsics, detect_checkerboard
 
@@ -788,6 +817,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     led_export_parser.add_argument("--output-dir", required=True)
     led_export_parser.set_defaults(function=command_led_sync_export)
+
+    auto_led_parser = subparsers.add_parser(
+        "auto-led-sync",
+        help="Automatically find four LED ROIs and estimate the RGB/EVS clock model.",
+    )
+    auto_led_parser.add_argument("--data-json", required=True)
+    auto_led_parser.add_argument("--output-yaml", required=True)
+    auto_led_parser.add_argument("--output-json", required=True)
+    auto_led_parser.set_defaults(function=command_auto_led_sync)
 
     intrinsics_parser = subparsers.add_parser("intrinsics")
     intrinsics_parser.add_argument("--config", required=True)

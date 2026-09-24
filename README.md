@@ -486,6 +486,23 @@ ros2 run multi_sensor_calibration multi-sensor-calibration scenario-overlay \
 `--projection fixed-depth --depth-m 1.0`のように指定できます。この場合、指定した
 fronto-parallel plane上だけが幾何学的に一致します。
 
+### LED ROIと時刻同期の自動推定
+
+`led-sync-export`が生成した16 px空間タイルから、開始・終了それぞれのRGB/EVS LED ROIを
+32・48・64 pxのsliding windowで独立に探索できます。既知の2.3秒点滅周期と正負極性を
+使い、単発の物体移動より反復点滅を優先します。
+
+```bash
+ros2 run multi_sensor_calibration multi-sensor-calibration auto-led-sync \
+  --data-json result/led_sync_data.json \
+  --output-yaml result/time_sync_led_auto.yaml \
+  --output-json result/auto_led_sync_result.json
+```
+
+JSONには4つのROI、各候補の信頼度・coverage・edge precision、時計モデルと対応エッジを
+保存します。YAMLは`scenario-overlay`へ直接指定できます。全記録を連続処理する場合は
+JetPilot側の`scripts/experiments/run_rc_popout_auto_pipeline.sh`を使用します。
+
 ## 現時点の制約
 
 - checkerboardとpinhole/radtan modelのみ
