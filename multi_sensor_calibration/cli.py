@@ -639,6 +639,23 @@ def command_export_kalibr(args: argparse.Namespace) -> None:
     )
 
 
+def command_calibration_overlay(args: argparse.Namespace) -> None:
+    from .calibration_overlay import render_calibration_overlay
+
+    summary = render_calibration_overlay(
+        args.dataset,
+        args.camchain,
+        args.output_dir,
+        evs_camera=args.evs_camera,
+        rgb_camera=args.rgb_camera,
+        alpha=args.alpha,
+        fps=args.fps,
+        every_n=args.every_n,
+        max_frames=args.max_frames,
+    )
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multi-sensor-calibration",
@@ -793,6 +810,21 @@ def build_parser() -> argparse.ArgumentParser:
     kalibr_parser.add_argument("--max-frames", type=int)
     kalibr_parser.add_argument("--output-dir", required=True)
     kalibr_parser.set_defaults(function=command_export_kalibr)
+
+    overlay_parser = subparsers.add_parser(
+        "calibration-overlay",
+        help="Render checkerboard-plane EVS overlays for Kalibr validation.",
+    )
+    overlay_parser.add_argument("--dataset", required=True)
+    overlay_parser.add_argument("--camchain", required=True)
+    overlay_parser.add_argument("--evs-camera", default="cam0")
+    overlay_parser.add_argument("--rgb-camera", default="cam1")
+    overlay_parser.add_argument("--alpha", type=float, default=0.45)
+    overlay_parser.add_argument("--fps", type=float)
+    overlay_parser.add_argument("--every-n", type=int, default=1)
+    overlay_parser.add_argument("--max-frames", type=int)
+    overlay_parser.add_argument("--output-dir", required=True)
+    overlay_parser.set_defaults(function=command_calibration_overlay)
 
     return parser
 

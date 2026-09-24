@@ -411,6 +411,32 @@ Docker内では`kalibr_bagcreater`によるROS 1 bag生成と
 既存結果の意図しない上書きを避けるため、datasetと出力ディレクトリは空である必要が
 あります。
 
+### EVS–RGB空間校正の重畳確認
+
+Kalibr結果と書き出し済みdatasetから、RGB画像上へEVSを半透明投影した確認動画を
+生成できます。カメラ間には並進があるため、全深度へ通用する単一homographyは存在
+しません。このコマンドは各RGB画像でcheckerboard姿勢を推定し、その平面上だけで
+幾何学的に正しい射影を行います。
+
+```bash
+ros2 run multi_sensor_calibration multi-sensor-calibration calibration-overlay \
+  --dataset result/kalibr_dataset \
+  --camchain result/kalibr_output/kalibr-camchain.yaml \
+  --alpha 0.45 \
+  --output-dir result/calibration_overlay
+```
+
+生成物:
+
+- `overlay_blend.mp4`: RGBと色付きEVSグレースケールの半透明合成
+- `overlay_edges.mp4`: RGB上へEVS edgeをcyanで重畳
+- `snapshots/`: 記録全体から抽出した確認用PNG
+- `summary.yaml`: 検出数とcheckerboard cornerの整合誤差
+
+`overlay_edges.mp4`では緑円がRGB corner、magenta十字がEVS cornerをRGBへ射影した
+位置です。背景などcheckerboardと異なる奥行きの物体にはparallaxが残るため、評価は
+checkerboard上の線とcornerで行います。
+
 ## 現時点の制約
 
 - checkerboardとpinhole/radtan modelのみ
