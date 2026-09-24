@@ -484,13 +484,30 @@ ros2 run multi_sensor_calibration multi-sensor-calibration scenario-overlay \
 重畳を横に並べた`rgb_vs_overlay.mp4`です。全区間が既定で、`--start-s`と
 `--duration-s`を指定した場合だけ部分出力します。対象のおおよそのEVS奥行きが既知なら、
 `--projection fixed-depth --depth-m 1.0`のように指定できます。この場合、指定した
-fronto-parallel plane上だけが幾何学的に一致します。
+fronto-parallel plane上だけが幾何学的に一致します。動画は生成後に既定で
+H.264・yuv420p・fast-start MP4へ変換するため、macOS QuickTimeとbrowserで再生できます。
+変換にはcontainerに導入済みのGStreamer `x264enc`を使います。デバッグ目的で従来の
+OpenCV `mp4v`を残す場合だけ`--keep-opencv-mp4v`を指定してください。
 
 ### LED ROIと時刻同期の自動推定
 
 `led-sync-export`が生成した16 px空間タイルから、開始・終了それぞれのRGB/EVS LED ROIを
 32・48・64 pxのsliding windowで独立に探索できます。既知の2.3秒点滅周期と正負極性を
 使い、単発の物体移動より反復点滅を優先します。
+
+自動結果、開始・終了preview、生成済み重畳動画を目視確認用HTMLへまとめる場合は、
+次を実行します。
+
+```bash
+ros2 run multi_sensor_calibration multi-sensor-calibration led-sync-review \
+  --data-json result/led_sync_data.json \
+  --auto-result result/auto_led_sync_result.json \
+  --video-dir result/scenario_overlay \
+  --output-dir result/review
+```
+
+`review/index.html`に開始・終了のROIデバッグ画像、confidence、対応edge数、coverage、
+precision、candidate gapと、RGB/Event重畳動画が表示されます。
 
 ```bash
 ros2 run multi_sensor_calibration multi-sensor-calibration auto-led-sync \

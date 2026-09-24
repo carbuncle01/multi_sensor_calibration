@@ -431,6 +431,18 @@ def command_auto_led_sync(args: argparse.Namespace) -> None:
     )
 
 
+def command_led_sync_review(args: argparse.Namespace) -> None:
+    from .led_sync_review import generate_led_sync_review
+
+    result = generate_led_sync_review(
+        args.data_json,
+        args.auto_result,
+        args.output_dir,
+        video_dir=args.video_dir,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def command_intrinsics(args: argparse.Namespace) -> None:
     from .intrinsics import calibrate_intrinsics, detect_checkerboard
 
@@ -713,6 +725,7 @@ def command_scenario_overlay(args: argparse.Namespace) -> None:
         duration_s=args.duration_s,
         every_n=args.every_n,
         max_frames=args.max_frames,
+        macos_compatible=not args.keep_opencv_mp4v,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
@@ -826,6 +839,16 @@ def build_parser() -> argparse.ArgumentParser:
     auto_led_parser.add_argument("--output-yaml", required=True)
     auto_led_parser.add_argument("--output-json", required=True)
     auto_led_parser.set_defaults(function=command_auto_led_sync)
+
+    review_parser = subparsers.add_parser(
+        "led-sync-review",
+        help="Create ROI debug sheets and a portable visual synchronization report.",
+    )
+    review_parser.add_argument("--data-json", required=True)
+    review_parser.add_argument("--auto-result", required=True)
+    review_parser.add_argument("--video-dir")
+    review_parser.add_argument("--output-dir", required=True)
+    review_parser.set_defaults(function=command_led_sync_review)
 
     intrinsics_parser = subparsers.add_parser("intrinsics")
     intrinsics_parser.add_argument("--config", required=True)
@@ -953,6 +976,14 @@ def build_parser() -> argparse.ArgumentParser:
     scenario_parser.add_argument("--duration-s", type=float)
     scenario_parser.add_argument("--every-n", type=int, default=1)
     scenario_parser.add_argument("--max-frames", type=int)
+    scenario_parser.add_argument(
+        "--keep-opencv-mp4v",
+        action="store_true",
+        help=(
+            "Skip the default H.264/yuv420p conversion. The resulting OpenCV "
+            "mp4v files may not display correctly in QuickTime or browsers."
+        ),
+    )
     scenario_parser.add_argument("--output-dir", required=True)
     scenario_parser.set_defaults(function=command_scenario_overlay)
 

@@ -165,6 +165,7 @@ def render_scenario_overlay(
     duration_s: float | None = None,
     every_n: int = 1,
     max_frames: int | None = None,
+    macos_compatible: bool = True,
 ) -> dict[str, Any]:
     if not 0.0 <= alpha <= 1.0:
         raise ValueError("alpha must be between 0 and 1")
@@ -334,6 +335,27 @@ def render_scenario_overlay(
     if rendered == 0:
         shutil.rmtree(staging, ignore_errors=True)
         raise ValueError("no synchronized RGB/EVS frames were rendered")
+    video_encoding: dict[str, str] = {
+        "codec": "mpeg4-part2",
+        "encoder": "opencv-mp4v",
+        "container": "mp4",
+    }
+    if macos_compatible:
+        from .video_compat import make_macos_compatible_mp4
+
+        try:
+            encodings = [
+                make_macos_compatible_mp4(staging / name)
+                for name in (
+                    "overlay_polarity.mp4",
+                    "polarity_only.mp4",
+                    "rgb_vs_overlay.mp4",
+                )
+            ]
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        video_encoding = encodings[0]
     summary = {
         "schema_version": 1,
         "bag": str(bag),
@@ -350,6 +372,7 @@ def render_scenario_overlay(
         "requested_frames": len(reference_times),
         "rendered_frames": rendered,
         "duration_s": rendered / rate,
+        "video_encoding": video_encoding,
         "outputs": [
             "overlay_polarity.mp4",
             "polarity_only.mp4",
