@@ -59,6 +59,28 @@ def _nearest_preview(data: dict[str, Any], sensor: str, target_s: float) -> dict
     return min(frames, key=lambda frame: abs(float(frame["t"]) - target_s))
 
 
+def _event_rich_preview(data, data_path, target_s, roi, cv2, np, radius_s=0.12):
+    frames = data.get("preview", {}).get("evs", [])
+    candidates = [frame for frame in frames if abs(float(frame["t"]) - target_s) <= radius_s]
+    if not candidates:
+        return _nearest_preview(data, "evs", target_s)
+    x, y = int(roi["x"]), int(roi["y"])
+    width, height = int(roi["width"]), int(roi["height"])
+    best, best_score = None, float("-inf")
+    for frame in candidates:
+        image = cv2.imread(str(data_path.parent / str(frame["path"])), cv2.IMREAD_COLOR)
+        if image is None:
+            continue
+        crop = image[y : y + height, x : x + width].astype(np.float32)
+        if crop.size == 0:
+            continue
+        background = np.median(image.astype(np.float32), axis=(0, 1), keepdims=True)
+        score = float(np.abs(crop - background).sum())
+        if score > best_score:
+            best, best_score = frame, score
+    return best if best is not None else _nearest_preview(data, "evs", target_s)
+
+
 def _annotated_image(image_path, roi, title, detail, cv2, np):
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
@@ -106,16 +128,27 @@ def _write_html(output: Path, result: dict[str, Any], video_dir: Path | None) ->
     for side in ("start", "end"):
         for sensor in ("rgb", "evs"):
             value = result["roi"][side][sensor]
+            timing = value.get("timing_confidence", value.get("confidence", "unknown"))
+            localization = value.get("localization_confidence", "unknown")
             rows.append(
                 "<tr>"
                 f"<td>{side}</td><td>{sensor.upper()}</td>"
-                f"<td class='{html.escape(value['confidence'])}'>{html.escape(value['confidence'])}</td>"
+                f"<td class='{html.escape(timing)}'>{html.escape(timing)}</td>"
+                f"<td class='{html.escape(localization)}'>{html.escape(localization)}</td>"
                 f"<td>{value['matched_edges']} / {value['expected_edges']}</td>"
                 f"<td>{value['coverage']:.3f}</td><td>{value['edge_precision']:.3f}</td>"
                 f"<td>{value['candidate_gap']:.3f}</td>"
                 f"<td><code>{html.escape(str(value['roi']))}</code></td></tr>"
             )
     clock = result["clock"]
+    localization = result.get("overall_localization_confidence", "unknown")
+    maximum_residual_ms = clock.get("max_abs_residual_s")
+    quantization_bound_ms = clock.get("timestamp_quantization_bound_s")
+    error_summary = ""
+    if maximum_residual_ms is not None:
+        error_summary += f" &nbsp; <b>max residual:</b> {maximum_residual_ms * 1000.0:.3f} ms"
+    if quantization_bound_ms is not None:
+        error_summary += f" &nbsp; <b>sampling bound:</b> ±{quantization_bound_ms * 1000.0:.3f} ms"
     videos = []
     if video_dir is not None:
         for name, label in (
@@ -141,13 +174,14 @@ table{{width:100%;border-collapse:collapse}} th,td{{padding:8px;border-bottom:1p
 </style></head><body>
 <h1>LED sync visual review</h1><p>{html.escape(str(result.get('session', '')))}</p>
 <div class="summary"><b>Overall:</b> <span class="{result['overall_confidence']}">{result['overall_confidence']}</span>
+ &nbsp; <b>location:</b> <span class="{localization}">{localization}</span>
  &nbsp; <b>offset:</b> {clock['offset_at_anchor_s'] * 1000.0:+.3f} ms
  &nbsp; <b>drift:</b> {clock['drift_ppm']:+.2f} ppm
  &nbsp; <b>RMS:</b> {clock['residual_rms_s'] * 1000.0:.3f} ms
- &nbsp; <b>edges:</b> {clock['matched_edges']}</div>
+ &nbsp; <b>edges:</b> {clock['matched_edges']}{error_summary}</div>
 <div class="grid"><section class="card"><h2>Start ROI</h2><img src="start_roi_debug.jpg"></section>
 <section class="card"><h2>End ROI</h2><img src="end_roi_debug.jpg"></section></div>
-<section class="card"><h2>ROI metrics</h2><table><thead><tr><th>Side</th><th>Sensor</th><th>Confidence</th><th>Edges</th><th>Coverage</th><th>Precision</th><th>Gap</th><th>ROI</th></tr></thead><tbody>{''.join(rows)}</tbody></table></section>
+<section class="card"><h2>ROI metrics</h2><table><thead><tr><th>Side</th><th>Sensor</th><th>Timing</th><th>Location</th><th>Edges</th><th>Coverage</th><th>Precision</th><th>Gap</th><th>ROI</th></tr></thead><tbody>{''.join(rows)}</tbody></table></section>
 {''.join(videos)}
 </body></html>"""
     (output / "index.html").write_text(document, encoding="utf-8")
@@ -178,11 +212,20 @@ def generate_led_sync_review(
         targets = _target_times(data, result, side)
         images = []
         for sensor in ("rgb", "evs"):
-            frame = _nearest_preview(data, sensor, targets[sensor])
-            source = data_path.parent / str(frame["path"])
             metrics = result["roi"][side][sensor]
+            if sensor == "evs":
+                frame = _event_rich_preview(
+                    data, data_path, targets[sensor], metrics["roi"], cv2, np
+                )
+                selection = "max-event near edge"
+            else:
+                frame = _nearest_preview(data, sensor, targets[sensor])
+                selection = "nearest edge"
+            source = data_path.parent / str(frame["path"])
+            timing = metrics.get("timing_confidence", metrics.get("confidence", "unknown"))
+            localization = metrics.get("localization_confidence", "unknown")
             detail = (
-                f"t={float(frame['t']):.3f}s  confidence={metrics['confidence']}  "
+                f"t={float(frame['t']):.3f}s  timing={timing} location={localization}  "
                 f"edges={metrics['matched_edges']}/{metrics['expected_edges']}  "
                 f"precision={metrics['edge_precision']:.3f}  gap={metrics['candidate_gap']:.3f}"
             )
@@ -198,7 +241,11 @@ def generate_led_sync_review(
             if not cv2.imwrite(str(output / name), annotated, [cv2.IMWRITE_JPEG_QUALITY, 92]):
                 raise RuntimeError(f"failed to write ROI review image: {output / name}")
             images.append(annotated)
-            generated[side][sensor] = {"image": name, "preview_time_s": float(frame["t"])}
+            generated[side][sensor] = {
+                "image": name,
+                "preview_time_s": float(frame["t"]),
+                "selection": selection,
+            }
 
         height = max(image.shape[0] for image in images)
         padded = [

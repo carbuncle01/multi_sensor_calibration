@@ -516,8 +516,12 @@ ros2 run multi_sensor_calibration multi-sensor-calibration auto-led-sync \
   --output-json result/auto_led_sync_result.json
 ```
 
-JSONには4つのROI、各候補の信頼度・coverage・edge precision、時計モデルと対応エッジを
-保存します。YAMLは`scenario-overlay`へ直接指定できます。全記録を連続処理する場合は
+JSONには4つのROI、各候補の時刻検出信頼度と位置一意性、coverage、edge precision、
+時計モデルと対応エッジを保存します。複数の場所にLED反射が現れても時刻同期品質を
+不当にlowにしないため、`timing_confidence`と`localization_confidence`を分離しています。
+またRGB観測区間とEVS binから求めた`timestamp_quantization_bound_s`、対応edgeの
+`max_abs_residual_s`と`p95_abs_residual_s`も保存します。YAMLは`scenario-overlay`へ直接
+指定できます。全記録を連続処理する場合は
 JetPilot側の`scripts/experiments/run_rc_popout_auto_pipeline.sh`を使用します。
 
 ## 現時点の制約

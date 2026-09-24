@@ -452,14 +452,21 @@ def _finalize_candidate(evaluated: list[Candidate], time_range):
     expected = max(1, _expected_edges(time_range, best.fit.phase_s if best.fit else best.phase_s))
     coverage = best.matched / expected
     gap = best.detection_score - second.detection_score if second else 1e9
-    confidence = "low"
-    if best.matched >= 18 and coverage >= 0.35 and best.precision >= 0.45 and gap >= 15.0:
-        confidence = "high"
-    elif best.matched >= 9 and coverage >= 0.18 and best.precision >= 0.20 and gap >= 3.0:
-        confidence = "medium"
+    # Synchronization quality and spatial uniqueness are deliberately separate.
+    # Reflections can produce several equally good ROIs (small candidate gap)
+    # while preserving the LED edge timing perfectly well.
+    timing_confidence = "low"
+    if best.matched >= 18 and coverage >= 0.35 and best.precision >= 0.45:
+        timing_confidence = "high"
+    elif best.matched >= 9 and coverage >= 0.18 and best.precision >= 0.20:
+        timing_confidence = "medium"
+    localization_confidence = "high" if gap >= 15.0 else "medium" if gap >= 3.0 else "low"
     return best, {
         "roi": best.roi,
-        "confidence": confidence,
+        # Keep confidence as an alias for existing UI/batch consumers.
+        "confidence": timing_confidence,
+        "timing_confidence": timing_confidence,
+        "localization_confidence": localization_confidence,
         "matched_edges": best.matched,
         "expected_edges": expected,
         "coverage": coverage,
@@ -549,8 +556,18 @@ def auto_led_sync(data_json: str | Path) -> tuple[dict[str, Any], dict[str, Any]
     origin = float(meta["time_origin_reference_s"])
     rgb_period = 1.0 / max(1.0, float(meta.get("rgbFps", 60.0)))
     evs_bin = float(meta.get("evs_bin_ms", 1.0)) / 1000.0
-    all_confidences = [result_rois[side][sensor]["confidence"] for side in ("start", "end") for sensor in ("rgb", "evs")]
-    overall = "low" if "low" in all_confidences else "medium" if "medium" in all_confidences else "high"
+    timing_confidences = [result_rois[side][sensor]["timing_confidence"] for side in ("start", "end") for sensor in ("rgb", "evs")]
+    localization_confidences = [result_rois[side][sensor]["localization_confidence"] for side in ("start", "end") for sensor in ("rgb", "evs")]
+    overall = "low" if "low" in timing_confidences else "medium" if "medium" in timing_confidences else "high"
+    overall_localization = "low" if "low" in localization_confidences else "medium" if "medium" in localization_confidences else "high"
+    absolute_residuals = np.abs(residuals)
+    rgb_half_intervals = [
+        (float(rgb.high_s) - float(rgb.low_s)) / 2.0
+        for _, rgb in pairs
+        if rgb.low_s is not None and rgb.high_s is not None
+    ]
+    rgb_half_interval_max = max(rgb_half_intervals, default=rgb_period / 2.0)
+    quantization_bound = rgb_half_interval_max + evs_bin / 2.0
 
     time_sync = {
         "schema_version": 1,
@@ -580,6 +597,12 @@ def auto_led_sync(data_json: str | Path) -> tuple[dict[str, Any], dict[str, Any]
             "drift_ppm": drift * 1_000_000.0,
             "led_pattern_used": True,
             "roi_confidence": overall,
+            "roi_localization_confidence": overall_localization,
+            "max_abs_residual_s": float(absolute_residuals.max()),
+            "p95_abs_residual_s": float(np.quantile(absolute_residuals, 0.95)),
+            "rgb_interval_half_width_max_s": rgb_half_interval_max,
+            "evs_bin_half_width_s": evs_bin / 2.0,
+            "timestamp_quantization_bound_s": quantization_bound,
         },
     }
     result = {
@@ -592,6 +615,7 @@ def auto_led_sync(data_json: str | Path) -> tuple[dict[str, Any], dict[str, Any]
         ],
         "roi": result_rois,
         "overall_confidence": overall,
+        "overall_localization_confidence": overall_localization,
         "clock": {
             "anchor_relative_s": anchor,
             "offset_at_anchor_s": offset,
@@ -599,6 +623,11 @@ def auto_led_sync(data_json: str | Path) -> tuple[dict[str, Any], dict[str, Any]
             "drift_ppm": drift * 1_000_000.0,
             "residual_rms_s": rms,
             "matched_edges": len(pairs),
+            "max_abs_residual_s": float(absolute_residuals.max()),
+            "p95_abs_residual_s": float(np.quantile(absolute_residuals, 0.95)),
+            "rgb_interval_half_width_max_s": rgb_half_interval_max,
+            "evs_bin_half_width_s": evs_bin / 2.0,
+            "timestamp_quantization_bound_s": quantization_bound,
         },
         "pairs": [
             {

@@ -420,10 +420,19 @@ def command_auto_led_sync(args: argparse.Namespace) -> None:
                 "time_sync": str(Path(args.output_yaml).resolve()),
                 "result": str(result_path.resolve()),
                 "overall_confidence": result["overall_confidence"],
+                "overall_localization_confidence": result[
+                    "overall_localization_confidence"
+                ],
                 "matched_edges": result["clock"]["matched_edges"],
                 "offset_ms": result["clock"]["offset_at_anchor_s"] * 1000.0,
                 "drift_ppm": result["clock"]["drift_ppm"],
                 "residual_rms_ms": result["clock"]["residual_rms_s"] * 1000.0,
+                "max_abs_residual_ms": result["clock"]["max_abs_residual_s"]
+                * 1000.0,
+                "timestamp_quantization_bound_ms": result["clock"][
+                    "timestamp_quantization_bound_s"
+                ]
+                * 1000.0,
             },
             ensure_ascii=False,
             indent=2,
