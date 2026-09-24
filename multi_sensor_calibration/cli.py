@@ -660,6 +660,34 @@ def command_calibration_overlay(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
+def command_scenario_overlay(args: argparse.Namespace) -> None:
+    from .scenario_overlay import render_scenario_overlay
+
+    summary = render_scenario_overlay(
+        args.bag,
+        args.event_file,
+        args.time_sync,
+        args.camchain,
+        args.output_dir,
+        rgb_topic=args.rgb_topic,
+        rgb_timestamp_source=args.rgb_timestamp_source,
+        evs_camera=args.evs_camera,
+        rgb_camera=args.rgb_camera,
+        projection=args.projection,
+        depth_m=args.depth_m,
+        event_window_ms=args.event_window_ms,
+        event_window_position=args.event_window_position,
+        event_dilate_px=args.event_dilate_px,
+        alpha=args.alpha,
+        fps=args.fps,
+        start_s=args.start_s,
+        duration_s=args.duration_s,
+        every_n=args.every_n,
+        max_frames=args.max_frames,
+    )
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multi-sensor-calibration",
@@ -851,6 +879,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     overlay_parser.add_argument("--output-dir", required=True)
     overlay_parser.set_defaults(function=command_calibration_overlay)
+
+    scenario_parser = subparsers.add_parser(
+        "scenario-overlay",
+        help="Render a full time-corrected RAW-event overlay on RGB scenario video.",
+    )
+    scenario_parser.add_argument("--bag", required=True)
+    scenario_parser.add_argument("--event-file", required=True)
+    scenario_parser.add_argument("--time-sync", required=True)
+    scenario_parser.add_argument("--camchain", required=True)
+    scenario_parser.add_argument(
+        "--rgb-topic", default="/realsense/color/image_raw"
+    )
+    scenario_parser.add_argument(
+        "--rgb-timestamp-source", choices=("bag", "header"), default="bag"
+    )
+    scenario_parser.add_argument("--evs-camera", default="cam0")
+    scenario_parser.add_argument("--rgb-camera", default="cam1")
+    scenario_parser.add_argument(
+        "--projection",
+        choices=("rotation-only", "fixed-depth"),
+        default="rotation-only",
+    )
+    scenario_parser.add_argument("--depth-m", type=float, default=1.0)
+    scenario_parser.add_argument("--event-window-ms", type=float, default=10.0)
+    scenario_parser.add_argument(
+        "--event-window-position",
+        choices=("before", "center", "after"),
+        default="center",
+    )
+    scenario_parser.add_argument("--event-dilate-px", type=int, default=1)
+    scenario_parser.add_argument("--alpha", type=float, default=0.85)
+    scenario_parser.add_argument("--fps", type=float)
+    scenario_parser.add_argument("--start-s", type=float, default=0.0)
+    scenario_parser.add_argument("--duration-s", type=float)
+    scenario_parser.add_argument("--every-n", type=int, default=1)
+    scenario_parser.add_argument("--max-frames", type=int)
+    scenario_parser.add_argument("--output-dir", required=True)
+    scenario_parser.set_defaults(function=command_scenario_overlay)
 
     return parser
 

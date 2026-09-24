@@ -460,6 +460,32 @@ ros2 run multi_sensor_calibration multi-sensor-calibration calibration-overlay \
 位置です。背景などcheckerboardと異なる奥行きの物体にはparallaxが残るため、評価は
 checkerboard上の線とcornerで行います。
 
+### 飛び出しシーケンスの全区間同期・重畳動画
+
+checkerboardのない実験記録では、保存済み空間校正と各sessionのLED時刻補正を使い、
+RAW極性eventをRGBへ重ねた全区間MP4を生成できます。既定の`rotation-only`はDSEC型で、
+並進を無視するため奥行きによるparallaxは残りますが、点灯・消灯やRCカー運動の時間同期を
+連続動画で確認できます。
+
+```bash
+ros2 run multi_sensor_calibration multi-sensor-calibration scenario-overlay \
+  --bag /workspaces/record/evs-popup-v1/session \
+  --event-file /workspaces/record/evs-popup-v1/session/openeb_camera.raw \
+  --time-sync result/time_sync_led.yaml \
+  --camchain config/calibrations/rc_popout_default/kalibr-camchain.yaml \
+  --projection rotation-only \
+  --event-window-ms 10 \
+  --event-window-position center \
+  --alpha 0.85 \
+  --output-dir result/scenario_overlay
+```
+
+生成物は、RGB重畳の`overlay_polarity.mp4`、白背景eventの`polarity_only.mp4`、RGBと
+重畳を横に並べた`rgb_vs_overlay.mp4`です。全区間が既定で、`--start-s`と
+`--duration-s`を指定した場合だけ部分出力します。対象のおおよそのEVS奥行きが既知なら、
+`--projection fixed-depth --depth-m 1.0`のように指定できます。この場合、指定した
+fronto-parallel plane上だけが幾何学的に一致します。
+
 ## 現時点の制約
 
 - checkerboardとpinhole/radtan modelのみ
