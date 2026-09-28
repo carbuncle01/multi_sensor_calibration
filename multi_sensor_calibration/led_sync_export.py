@@ -241,7 +241,7 @@ def _tile_means_u8(image, tile_size: int):
         for tile_x in range(grid_width):
             x0 = tile_x * tile_size
             x1 = min(width, x0 + tile_size)
-            values[index] = int(round(float(image[y0:y1, x0:x1].mean())))
+            values[index] = int(round(float(np.clip(image[y0:y1, x0:x1].mean(), 0.0, 1.0)) * 255.0))
             index += 1
     return values, grid_width, grid_height
 
@@ -282,6 +282,7 @@ def _write_rgb_spatial_data(
     return {
         "path": "roi_data/rgb_tiles.bin",
         "encoding": "float64_time_then_uint8_tile_means_le",
+        "intensity_scale": "uint8_0_255_v1",
         "tile_size": tile_size,
         "grid_width": grid_width,
         "grid_height": grid_height,

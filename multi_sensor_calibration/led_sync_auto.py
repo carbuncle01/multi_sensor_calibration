@@ -89,13 +89,17 @@ def _side_range(meta: dict[str, Any], side: str) -> tuple[float, float]:
     ranges = meta.get("ranges")
     if not isinstance(ranges, list) or not ranges:
         raise ValueError("ROI tile metadata has no start/end ranges")
+    if len(ranges) == 1:
+        low, high = map(float, ranges[0])
+        middle = (low + high) / 2.0
+        return (low, middle) if side == "start" else (middle, high)
     value = ranges[0] if side == "start" else ranges[-1]
     return float(value[0]), float(value[1])
 
 
 def _side_for_time(time_s: float, ranges: list[list[float]]) -> str:
     if len(ranges) < 2:
-        return "start"
+        return "start" if time_s < (ranges[0][0] + ranges[0][1]) / 2.0 else "end"
     first_center = (float(ranges[0][0]) + float(ranges[0][1])) / 2.0
     last_center = (float(ranges[-1][0]) + float(ranges[-1][1])) / 2.0
     return "start" if abs(time_s - first_center) <= abs(time_s - last_center) else "end"
@@ -113,6 +117,12 @@ def _load_rgb_tiles(base: Path, meta: dict[str, Any]):
     records = raw[: frame_count * record_bytes].reshape(frame_count, record_bytes)
     times = np.frombuffer(records[:, :8].copy().tobytes(), dtype="<f8")
     tiles = records[:, 8 : 8 + tile_count]
+    if meta.get("intensity_scale") != "uint8_0_255_v1" and int(tiles.max()) <= 1:
+        raise ValueError(
+            "RGB ROI tiles contain only 0/1 brightness values from a legacy export; "
+            "rebuild multi_sensor_calibration and re-export with --force-export. "
+            "The lost intensity cannot be recovered from these tiles."
+        )
     return times, tiles
 
 

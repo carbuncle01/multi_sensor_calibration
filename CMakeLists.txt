@@ -26,6 +26,10 @@ if(BUILD_TESTING)
     test/test_scenario_overlay.py
   )
   ament_add_pytest_test(
+    test_led_spatial_regression
+    test/test_led_spatial_regression.py
+  )
+  ament_add_pytest_test(
     test_event_windows
     test/test_event_windows.py
   )
