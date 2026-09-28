@@ -730,6 +730,8 @@ def command_scenario_overlay(args: argparse.Namespace) -> None:
         event_dilate_px=args.event_dilate_px,
         alpha=args.alpha,
         fps=args.fps,
+        timeline=args.timeline,
+        step_ms=args.step_ms,
         start_s=args.start_s,
         duration_s=args.duration_s,
         every_n=args.every_n,
@@ -972,15 +974,19 @@ def build_parser() -> argparse.ArgumentParser:
         default="rotation-only",
     )
     scenario_parser.add_argument("--depth-m", type=float, default=1.0)
-    scenario_parser.add_argument("--event-window-ms", type=float, default=10.0)
+    scenario_parser.add_argument("--event-window-ms", type=float, help="Accumulation: default 10 ms for rgb, 2 ms for event timeline.")
     scenario_parser.add_argument(
         "--event-window-position",
         choices=("before", "center", "after"),
-        default="center",
+        default=None,
     )
     scenario_parser.add_argument("--event-dilate-px", type=int, default=1)
     scenario_parser.add_argument("--alpha", type=float, default=0.85)
-    scenario_parser.add_argument("--fps", type=float)
+    scenario_parser.add_argument("--fps", type=float, help="Playback FPS; event timeline defaults to 60.")
+    scenario_parser.add_argument("--timeline", choices=("rgb", "event"), default="rgb",
+                                 help="event: uniform EVS updates with causal RGB frame hold.")
+    scenario_parser.add_argument("--step-ms", type=float, default=1.0,
+                                 help="Source-time step for event timeline (default: 1 ms).")
     scenario_parser.add_argument("--start-s", type=float, default=0.0)
     scenario_parser.add_argument("--duration-s", type=float)
     scenario_parser.add_argument("--every-n", type=int, default=1)

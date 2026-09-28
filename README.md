@@ -489,6 +489,48 @@ H.264・yuv420p・fast-start MP4へ変換するため、macOS QuickTimeとbrowse
 変換にはcontainerに導入済みのGStreamer `x264enc`を使います。デバッグ目的で従来の
 OpenCV `mp4v`を残す場合だけ`--keep-opencv-mp4v`を指定してください。
 
+### EVSの独立更新を表示するスローモーション
+
+`scenario-overlay --timeline event`はRGB取得時刻と独立した等間隔の時刻でEVSを更新します。
+`--step-ms 1 --fps 60`では実時間1 msを動画1コマとして、約16.67倍スローで再生します。
+RGBは各表示時刻以前の最新フレームを次の取得時刻まで保持し、補間や人工的な遅延は加えません。
+途中の`--start-s`を指定しても、その直前のRGBフレームを読み込んで保持します。
+
+```bash
+ros2 run multi_sensor_calibration multi-sensor-calibration scenario-overlay \
+  --bag /workspaces/record/09-28/rc_popout_main_20260928/recordings/popout-0928-static_01 \
+  --event-file /workspaces/record/09-28/rc_popout_main_20260928/recordings/popout-0928-static_01/openeb_camera_20260928_021811.raw \
+  --time-sync /workspaces/record/09-28/rc_popout_main_20260928/recordings/analysis/led_sync/popout-0928-static_01/time_sync_led_auto.yaml \
+  --camchain /workspaces/ros2_ws/src/tool/multi_sensor_calibration/config/calibrations/rc_popout_default/kalibr-camchain.yaml \
+  --timeline event --step-ms 1 --fps 60 \
+  --event-window-ms 2 --event-window-position before \
+  --output-dir /workspaces/record/09-28/rc_popout_main_20260928/recordings/analysis/scenario_overlay/popout-0928-static_01/slow_1ms
+```
+
+全区間は長い動画になるため、飛び出し付近の時刻を確認してから、例えば
+`--start-s 10 --duration-s 1`を追加すると実時間1秒を約16.67秒で出力できます。
+10秒は例であり、実際の飛び出し時刻へ置き換えてください。開始秒はRGBトピックの
+最初のタイムスタンプ基準です。`--max-frames`は出力コマ数の上限です。
+出力先は未作成または空のディレクトリを指定してください。
+
+このモードの既定蓄積窓は2 ms、窓位置は`before`（表示時刻直前）です。
+`center`や`after`は未来のイベントを含むため拒否します。RGBの更新を意図的に
+間引かないよう`--every-n`は1に限定します。時間刻みと蓄積幅は独立しており、
+刻みより長い窓は重なります。`--timeline rgb`（既定）は従来どおりRGB時刻で更新し、
+既定の蓄積窓10 ms・`center`を維持します。
+
+出力MP4の名前は通常モードと共通です。RGBラベルには取得時刻と保持時間`held`、
+EVSラベルには表示時刻、蓄積幅、スロー倍率を表示します。`frames.csv`には出力コマごとの
+表示時刻、RGB時刻、保持時間、EVSセンサー時刻の窓範囲・イベント数を保存します。
+`summary.yaml`にはtimeline、刻み、倍率、使用したRGB時刻の種類を記録します。
+RGBの最終時刻を超えて出力せず、EVSが先に終了した場合はそこで動画を終了し、
+`truncated: true`と要求・実出力コマ数を記録します。
+
+LED同期時と同じ`--rgb-timestamp-source`を使ってください（既定は`bag`）。
+これは記録されたタイムスタンプの可視化であり、露光・転送・検出器を含む実際の応答遅延の
+測定ではありません。LED同期の誤差、RGBの露光時間、rotation-only射影の視差は残ります。
+1 ms刻みで描画しても同期精度が1 msになるわけではありません。
+
 ### LED ROIと時刻同期の自動推定
 
 `led-sync-export`が生成した16 px空間タイルから、開始・終了それぞれのRGB/EVS LED ROIを

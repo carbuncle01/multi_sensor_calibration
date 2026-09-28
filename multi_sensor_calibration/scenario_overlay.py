@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import math
 import shutil
+from bisect import bisect_right
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -88,6 +91,53 @@ def _selected_rgb_times(
     return origin, indices, times
 
 
+def _event_timeline(rgb_times, *, start_s, duration_s, step_ms, max_frames):
+    """Return regular reference times and the RGB index range needed for holding.
+
+    Stop at the last observed RGB timestamp: do not invent coverage after EOF.
+    A crop between RGB frames retains the preceding frame, not a future one.
+    """
+    if not math.isfinite(step_ms) or step_ms < 0.001:
+        raise ValueError("step_ms must be finite and at least 0.001 ms")
+    if not rgb_times or any(not math.isfinite(t) for t in rgb_times):
+        raise ValueError("RGB timestamps must be finite and non-empty")
+    if any(b <= a for a, b in zip(rgb_times, rgb_times[1:])):
+        raise ValueError("event timeline requires strictly increasing RGB timestamps")
+    begin = rgb_times[0] + start_s
+    last = rgb_times[-1]
+    if begin > last:
+        raise ValueError("no RGB coverage in the selected time range")
+    step_s = step_ms / 1000.0
+    span = last - begin
+    if duration_s is not None:
+        span = min(span, duration_s)
+    count = int(math.floor(span / step_s)) + 1
+    if max_frames is not None:
+        count = min(count, max_frames)
+    times = [begin + i * step_s for i in range(count)
+             if begin + i * step_s <= last
+             and (duration_s is None or i * step_s < duration_s)]
+    if not times:
+        raise ValueError("no frames remain in the selected time range")
+    first_index = bisect_right(rgb_times, times[0]) - 1
+    stop_index = bisect_right(rgb_times, times[-1])
+    return times, list(range(first_index, stop_index))
+
+
+def _hold_rgb_frames(rgb_frames, reference_times):
+    """Stream the latest RGB frame at or before each reference timestamp."""
+    frames = iter(rgb_frames)
+    upcoming = next(frames, None)
+    current = None
+    for reference_time in reference_times:
+        while upcoming is not None and upcoming[0] <= reference_time:
+            current = upcoming
+            upcoming = next(frames, None)
+        if current is None:
+            raise ValueError("no preceding RGB frame for display timestamp")
+        yield current
+
+
 def _event_frames(event_file, time_sync, reference_times, window_ms, position):
     from .event_windows import WindowDefinition, reference_aligned_window_ends
     from .evs_pipeline import generate_event_frames
@@ -156,20 +206,34 @@ def render_scenario_overlay(
     rgb_camera: str = "cam1",
     projection: str = "rotation-only",
     depth_m: float = 1.0,
-    event_window_ms: float = 10.0,
-    event_window_position: str = "center",
+    event_window_ms: float | None = None,
+    event_window_position: str | None = None,
     event_dilate_px: int = 1,
     alpha: float = 0.85,
     fps: float | None = None,
+    timeline: str = "rgb",
+    step_ms: float = 1.0,
     start_s: float = 0.0,
     duration_s: float | None = None,
     every_n: int = 1,
     max_frames: int | None = None,
     macos_compatible: bool = True,
 ) -> dict[str, Any]:
+    if timeline not in {"rgb", "event"}:
+        raise ValueError("timeline must be rgb or event")
+    if timeline == "event" and every_n != 1:
+        raise ValueError("event timeline requires every_n=1 to preserve RGB updates")
+    if event_window_ms is None:
+        event_window_ms = 2.0 if timeline == "event" else 10.0
+    if event_window_position is None:
+        event_window_position = "before" if timeline == "event" else "center"
+    if timeline == "event" and event_window_position != "before":
+        raise ValueError("event timeline requires event_window_position=before")
+    if not math.isfinite(start_s) or (duration_s is not None and not math.isfinite(duration_s)):
+        raise ValueError("start_s and duration_s must be finite")
     if not 0.0 <= alpha <= 1.0:
         raise ValueError("alpha must be between 0 and 1")
-    if event_window_ms <= 0.0:
+    if not math.isfinite(event_window_ms) or event_window_ms < 0.001:
         raise ValueError("event_window_ms must be positive")
     if event_window_position not in {"before", "center", "after"}:
         raise ValueError("event_window_position must be before, center, or after")
@@ -216,11 +280,16 @@ def render_scenario_overlay(
         bag,
         rgb_topic,
         rgb_timestamp_source,
-        start_s=start_s,
-        duration_s=duration_s,
+        start_s=0.0 if timeline == "event" else start_s,
+        duration_s=None if timeline == "event" else duration_s,
         every_n=every_n,
-        max_frames=max_frames,
+        max_frames=None if timeline == "event" else max_frames,
     )
+    if timeline == "event":
+        reference_times, selected_indices = _event_timeline(
+            reference_times, start_s=start_s, duration_s=duration_s,
+            step_ms=step_ms, max_frames=max_frames,
+        )
     event_frames, clock = _event_frames(
         raw,
         sync_file,
@@ -232,12 +301,17 @@ def render_scenario_overlay(
         bag, rgb_topic, rgb_timestamp_source, selected_indices
     )
 
-    if fps is None:
+    if timeline == "event":
+        rgb_frames = _hold_rgb_frames(rgb_frames, reference_times)
+
+    if fps is None and timeline == "event":
+        rate = 60.0
+    elif fps is None:
         differences = np.diff(np.asarray(reference_times, dtype=float))
         rate = float(1.0 / np.median(differences)) if len(differences) else 60.0
     else:
         rate = float(fps)
-    if rate <= 0.0:
+    if not math.isfinite(rate) or rate <= 0.0:
         raise ValueError("fps must be positive")
 
     output = Path(output_dir).resolve()
@@ -279,19 +353,29 @@ def render_scenario_overlay(
     } if len(reference_times) > 1 else {0}
 
     rendered = 0
+    slowdown = 1000.0 / (step_ms * rate) if timeline == "event" else None
+    manifest = (staging / "frames.csv").open("w", newline="", encoding="utf-8")
+    frame_csv = csv.writer(manifest)
+    frame_csv.writerow([
+        "frame", "video_time_s", "reference_time_s", "relative_time_s",
+        "rgb_time_s", "rgb_age_ms", "event_start_us", "event_end_us", "event_count",
+    ])
+    cached_rgb_time = None
     try:
         try:
-            for index, ((rgb_time, rgb_image), event_frame) in enumerate(
-                zip(rgb_frames, event_frames)
+            for index, (reference_time, (rgb_time, rgb_image), event_frame) in enumerate(
+                zip(reference_times, rgb_frames, event_frames)
             ):
                 if (rgb_image.shape[1], rgb_image.shape[0]) != rgb["size"]:
                     raise ValueError("RGB frame dimensions do not match the calibration")
                 polarity = event_frame.image
                 if (polarity.shape[1], polarity.shape[0]) != evs["size"]:
                     raise ValueError("EVS RAW dimensions do not match the calibration")
-                rgb_undistorted = cv2.remap(
-                    rgb_image, map_rgb[0], map_rgb[1], cv2.INTER_LINEAR
-                )
+                if cached_rgb_time != rgb_time:
+                    rgb_undistorted = cv2.remap(
+                        rgb_image, map_rgb[0], map_rgb[1], cv2.INTER_LINEAR
+                    )
+                    cached_rgb_time = rgb_time
                 event_only, event_mask = _polarity_images(
                     polarity,
                     map_evs,
@@ -305,15 +389,20 @@ def render_scenario_overlay(
                     rgb_undistorted, event_only, event_mask, alpha, np
                 )
                 effective_offset_ms = (
-                    rgb_time - clock.inverse(rgb_time)
+                    reference_time - clock.inverse(reference_time)
                 ) * 1000.0
-                relative_s = rgb_time - origin
+                relative_s = reference_time - origin
+                rgb_age_ms = (reference_time - rgb_time) * 1000.0
                 detail = (
                     f"{projection}  dt={effective_offset_ms:+.2f}ms  "
                     f"events={event_window_ms:g}ms  t={relative_s:.3f}s"
                 )
                 rgb_labeled = rgb_undistorted.copy()
-                _annotate(rgb_labeled, f"RGB  t={relative_s:.3f}s", cv2)
+                rgb_label = f"RGB  t={rgb_time - origin:.3f}s"
+                if timeline == "event":
+                    rgb_label += f"  held={rgb_age_ms:.1f}ms"
+                    detail = f"EVS t={relative_s:.3f}s  past {event_window_ms:g}ms  {slowdown:.2f}x slow"
+                _annotate(rgb_labeled, rgb_label, cv2)
                 _annotate(overlay, detail, cv2)
                 _annotate(event_only, detail, cv2)
                 comparison = np.concatenate((rgb_labeled, overlay), axis=1)
@@ -321,11 +410,17 @@ def render_scenario_overlay(
                 event_writer.write(event_only)
                 comparison_writer.write(comparison)
                 if index in snapshot_indices:
-                    stamp = int(round(rgb_time * 1_000_000_000.0))
+                    stamp = int(round(reference_time * 1_000_000_000.0))
                     cv2.imwrite(str(snapshots / f"{stamp}_overlay.png"), overlay)
                     cv2.imwrite(str(snapshots / f"{stamp}_comparison.png"), comparison)
+                frame_csv.writerow([
+                    index, index / rate, reference_time, relative_s, rgb_time, rgb_age_ms,
+                    event_frame.window.start_us, event_frame.window.end_us,
+                    event_frame.window.event_count,
+                ])
                 rendered += 1
         finally:
+            manifest.close()
             for writer in writers:
                 writer.release()
     except Exception:
@@ -369,6 +464,16 @@ def render_scenario_overlay(
         "event_dilate_px": int(event_dilate_px),
         "alpha": float(alpha),
         "fps": rate,
+        "timeline": timeline,
+        "step_ms": step_ms if timeline == "event" else None,
+        "slowdown_factor": slowdown,
+        "rgb_timestamp_source": rgb_timestamp_source,
+        "rgb_display_policy": "latest_at_or_before" if timeline == "event" else "rgb_frame",
+        "reference_start_s": reference_times[0],
+        "reference_end_s": reference_times[rendered - 1],
+        "truncated": rendered < len(reference_times),
+        "timing_note": "Offline timestamp visualization; not a measurement of sensor delivery or inference latency.",
+        "frame_manifest": "frames.csv",
         "requested_frames": len(reference_times),
         "rendered_frames": rendered,
         "duration_s": rendered / rate,
