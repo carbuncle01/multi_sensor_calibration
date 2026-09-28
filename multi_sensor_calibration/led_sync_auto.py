@@ -517,6 +517,7 @@ def _clock_fit(pairs: list[tuple[Edge, Edge]]):
 
 
 def auto_led_sync(data_json: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    np = _np()
     source = Path(data_json).resolve()
     data = json.loads(source.read_text(encoding="utf-8"))
     meta = data.get("meta")
