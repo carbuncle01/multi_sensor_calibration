@@ -222,8 +222,8 @@ def render_scenario_overlay(
     max_frames: int | None = None,
     macos_compatible: bool = True,
 ) -> dict[str, Any]:
-    if view_frame not in {"rgb", "evs"}:
-        raise ValueError("view_frame must be rgb or evs")
+    if view_frame not in {"rgb", "evs", "rgb-common"}:
+        raise ValueError("view_frame must be rgb, evs or rgb-common")
     if timeline not in {"rgb", "event"}:
         raise ValueError("timeline must be rgb or event")
     if timeline == "event" and every_n != 1:
@@ -358,7 +358,7 @@ def render_scenario_overlay(
             rgb["matrix"], rgb["distortion"], None, rgb["matrix"], rgb["size"], cv2.CV_32FC1
         )
         common_valid = None
-        if view_frame == "evs":
+        if view_frame != "rgb":
             # Linear sampling support must be valid in both sensors (including undistortion).
             supports = []
             for camera, maps, transform_view in ((rgb, map_rgb, rgb_to_view), (evs, map_evs, event_to_view)):
@@ -411,6 +411,8 @@ def render_scenario_overlay(
                     if view_frame == "evs":
                         rgb_undistorted = cv2.warpPerspective(rgb_undistorted, rgb_to_view, output_size)
                         rgb_undistorted[~common_valid] = (35, 35, 35)
+                    elif view_frame == "rgb-common":
+                        rgb_undistorted[~common_valid] = (rgb_undistorted[~common_valid] * 0.25).astype("uint8")
                     cached_rgb_time = rgb_time
                 event_only, event_mask = _polarity_images(
                     polarity,
@@ -441,6 +443,8 @@ def render_scenario_overlay(
                 if timeline == "event":
                     rgb_label += f"  held={rgb_age_ms:.1f}ms"
                     detail = f"EVS t={relative_s:.3f}s  past {event_window_ms:g}ms  {slowdown:.2f}x slow"
+                if view_frame == "rgb-common":
+                    rgb_label += "  bright: common FOV / dim: outside"
                 _annotate(rgb_labeled, rgb_label, cv2)
                 _annotate(overlay, detail, cv2)
                 _annotate(event_only, detail, cv2)
@@ -499,7 +503,7 @@ def render_scenario_overlay(
         "projection": projection,
         "view_frame": view_frame,
         "output_size": list(output_size),
-        "common_valid_mask": "common_valid_mask.png" if view_frame == "evs" else None,
+        "common_valid_mask": "common_valid_mask.png" if view_frame != "rgb" else None,
         "camchain_sha256": hashlib.sha256(camchain_file.read_bytes()).hexdigest(),
         "time_sync_sha256": hashlib.sha256(sync_file.read_bytes()).hexdigest(),
         "reference_origin_s": origin,

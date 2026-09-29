@@ -112,7 +112,7 @@ class SlowMotionTimingTest(unittest.TestCase):
     def test_renderer_writes_held_rgb_and_frame_manifest(self):
         import numpy as np
         from multi_sensor_calibration import scenario_overlay as module
-        for timeline, event_limit, view_frame in (("rgb", None, "rgb"), ("event", None, "rgb"), ("event", 2, "rgb"), ("rgb", None, "evs")):
+        for timeline, event_limit, view_frame in (("rgb", None, "rgb"), ("event", None, "rgb"), ("event", 2, "rgb"), ("rgb", None, "evs"), ("rgb", None, "rgb-common")):
             with self.subTest(timeline=timeline, event_limit=event_limit, view_frame=view_frame), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
                 root = Path(tmp)
                 source = root / 'input'
@@ -186,7 +186,7 @@ class SlowMotionTimingTest(unittest.TestCase):
                 self.assertEqual(len(rows), summary['rendered_frames'])
                 self.assertTrue((output / 'summary.yaml').is_file())
                 self.assertEqual(summary['view_frame'], view_frame)
-                if view_frame == 'evs':
+                if view_frame != 'rgb':
                     self.assertEqual(summary['common_valid_mask'], 'common_valid_mask.png')
 
     def test_fixed_depth_rgb_to_evs_is_inverse_of_calibrated_projection(self):

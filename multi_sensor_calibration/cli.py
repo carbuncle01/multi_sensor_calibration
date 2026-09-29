@@ -974,7 +974,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("rotation-only", "fixed-depth"),
         default="rotation-only",
     )
-    scenario_parser.add_argument("--view-frame", choices=("rgb", "evs"), default="rgb",
+    scenario_parser.add_argument("--view-frame", choices=("rgb", "evs", "rgb-common"), default="rgb",
                                  help="evs: warp RGB to EVS coordinates and mask common valid field of view.")
     scenario_parser.add_argument("--depth-m", type=float, default=1.0)
     scenario_parser.add_argument("--event-window-ms", type=float, help="Accumulation: default 10 ms for rgb, 2 ms for event timeline.")
