@@ -19,29 +19,6 @@ from .calibration_overlay import (
 )
 
 
-def _fov_guides(valid, np):
-    """Precompute diagonal outside hatching and a six-pixel boundary band."""
-    height, width = valid.shape
-    yy, xx = np.indices(valid.shape)
-    hatch = ~valid & ((xx + yy) % 24 < 5)
-    padded = np.pad(valid, 3, mode="edge")
-    inner, outer = valid.copy(), valid.copy()
-    for dy in range(7):
-        for dx in range(7):
-            neighbor = padded[dy:dy + height, dx:dx + width]
-            inner &= neighbor
-            outer |= neighbor
-    return hatch, outer & ~inner
-
-
-def _draw_fov_guides(image, valid, guides):
-    # BGR amber is distinct from red/blue event polarity colors.
-    hatch, boundary = guides
-    image[~valid] = (image[~valid] * 0.25).astype("uint8")
-    image[hatch] = (40, 170, 230)
-    image[boundary] = (0, 255, 255)
-
-
 def _projection_homography(evs, rgb, transform, mode: str, depth_m: float, np):
     rotation = transform[:3, :3]
     if mode == "rotation-only":
@@ -397,8 +374,6 @@ def render_scenario_overlay(
             if not cv2.imwrite(str(staging / "common_valid_mask.png"), common_valid.astype("uint8") * 255):
                 raise RuntimeError("could not write common field-of-view mask")
 
-        fov_guides = _fov_guides(common_valid, np) if view_frame == "rgb-common" else None
-
         snapshot_indices = {
             round(index * (len(reference_times) - 1) / min(11, len(reference_times) - 1))
             for index in range(min(12, len(reference_times)))
@@ -436,6 +411,8 @@ def render_scenario_overlay(
                     if view_frame == "evs":
                         rgb_undistorted = cv2.warpPerspective(rgb_undistorted, rgb_to_view, output_size)
                         rgb_undistorted[~common_valid] = (35, 35, 35)
+                    elif view_frame == "rgb-common":
+                        rgb_undistorted[~common_valid] = (rgb_undistorted[~common_valid] * 0.25).astype("uint8")
 
                     cached_rgb_time = rgb_time
                 event_only, event_mask = _polarity_images(
@@ -468,9 +445,7 @@ def render_scenario_overlay(
                     rgb_label += f"  held={rgb_age_ms:.1f}ms"
                     detail = f"EVS t={relative_s:.3f}s  past {event_window_ms:g}ms  {slowdown:.2f}x slow"
                 if view_frame == "rgb-common":
-                    for image in (rgb_labeled, overlay, event_only):
-                        _draw_fov_guides(image, common_valid, fov_guides)
-                    rgb_label += "  YELLOW: FOV boundary / HATCH: outside"
+                    rgb_label += "  bright: common FOV / dim: outside"
                 _annotate(rgb_labeled, rgb_label, cv2)
                 _annotate(overlay, detail, cv2)
                 _annotate(event_only, detail, cv2)
@@ -528,7 +503,6 @@ def render_scenario_overlay(
         "camchain": str(camchain_file),
         "projection": projection,
         "view_frame": view_frame,
-        "fov_visualization": "yellow-boundary-amber-hatch" if view_frame == "rgb-common" else None,
         "output_size": list(output_size),
         "common_valid_mask": "common_valid_mask.png" if view_frame != "rgb" else None,
         "camchain_sha256": hashlib.sha256(camchain_file.read_bytes()).hexdigest(),
