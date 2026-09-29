@@ -491,6 +491,13 @@ OpenCV `mp4v`を残す場合だけ`--keep-opencv-mp4v`を指定してくださ�
 
 ### EVSの独立更新を表示するスローモーション
 
+`--view-frame evs`を加えると、RGBを歪み補正後のEVS画素座標へ投影し、両センサの
+共通有効領域に制限した比較動画を生成します。既定の`--view-frame rgb`は従来どおりです。
+`--projection fixed-depth --depth-m 2.2`などで対象平面を指定できますが、その平面と
+異なる奥行きには視差が残ります。EVS視野モードでは`common_valid_mask.png`を保存し、
+`summary.yaml`と`summary.json`には出力座標・投影行列・校正と同期のSHA256を記録します。
+LED Sync Inspectorの「区間・共通視野・ROI」から動画確認と注釈保存に利用できます。
+
 `scenario-overlay --timeline event`はRGB取得時刻と独立した等間隔の時刻でEVSを更新します。
 `--step-ms 1 --fps 60`では実時間1 msを動画1コマとして、約16.67倍スローで再生します。
 RGBは各表示時刻以前の最新フレームを次の取得時刻まで保持し、補間や人工的な遅延は加えません。

@@ -112,8 +112,8 @@ class SlowMotionTimingTest(unittest.TestCase):
     def test_renderer_writes_held_rgb_and_frame_manifest(self):
         import numpy as np
         from multi_sensor_calibration import scenario_overlay as module
-        for timeline, event_limit in (("rgb", None), ("event", None), ("event", 2)):
-            with self.subTest(timeline=timeline, event_limit=event_limit), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+        for timeline, event_limit, view_frame in (("rgb", None, "rgb"), ("event", None, "rgb"), ("event", 2, "rgb"), ("rgb", None, "evs")):
+            with self.subTest(timeline=timeline, event_limit=event_limit, view_frame=view_frame), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
                 root = Path(tmp)
                 source = root / 'input'
                 source.touch()
@@ -134,7 +134,8 @@ class SlowMotionTimingTest(unittest.TestCase):
 
                 cv2 = MagicMock()
                 cv2.VideoWriter.side_effect = Writer
-                cv2.remap.side_effect = lambda image, *a: image.copy()
+                cv2.remap.side_effect = lambda image, *a, **kw: image.copy()
+                cv2.warpPerspective.side_effect = lambda image, *a, **kw: image.copy()
                 cv2.initUndistortRectifyMap.return_value = (None, None)
                 stack.enter_context(patch.dict('sys.modules', {'cv2': cv2}))
                 camera = {'matrix': np.eye(3), 'distortion': np.zeros(5), 'size': (2, 2)}
@@ -164,7 +165,7 @@ class SlowMotionTimingTest(unittest.TestCase):
                 stack.enter_context(patch.object(module, '_annotate'))
                 summary = module.render_scenario_overlay(
                     source, source, source, source, output,
-                    timeline=timeline, macos_compatible=False,
+                    timeline=timeline, view_frame=view_frame, macos_compatible=False,
                 )
                 with (output / 'frames.csv').open() as stream:
                     rows = list(csv.DictReader(stream))
@@ -184,6 +185,22 @@ class SlowMotionTimingTest(unittest.TestCase):
                 self.assertEqual(summary['reference_end_s'], float(rows[-1]['reference_time_s']))
                 self.assertEqual(len(rows), summary['rendered_frames'])
                 self.assertTrue((output / 'summary.yaml').is_file())
+                self.assertEqual(summary['view_frame'], view_frame)
+                if view_frame == 'evs':
+                    self.assertEqual(summary['common_valid_mask'], 'common_valid_mask.png')
+
+    def test_fixed_depth_rgb_to_evs_is_inverse_of_calibrated_projection(self):
+        import numpy as np
+        from multi_sensor_calibration.scenario_overlay import _projection_homography
+        evs = {'matrix': np.diag([550., 550., 1.])}
+        rgb = {'matrix': np.diag([425., 425., 1.])}
+        transform = np.eye(4)
+        transform[0, 3] = 0.04
+        h = _projection_homography(evs, rgb, transform, 'fixed-depth', 2.2, np)
+        point = np.array([100., 50., 1.])
+        mapped = h @ point
+        np.testing.assert_allclose(np.linalg.inv(h) @ mapped, point)
+        self.assertAlmostEqual(mapped[0], 425 * (100 / 550 + .04 / 2.2))
 
 
 if __name__ == '__main__':

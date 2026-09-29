@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import math
 import shutil
 from bisect import bisect_right
@@ -205,6 +207,7 @@ def render_scenario_overlay(
     evs_camera: str = "cam0",
     rgb_camera: str = "cam1",
     projection: str = "rotation-only",
+    view_frame: str = "rgb",
     depth_m: float = 1.0,
     event_window_ms: float | None = None,
     event_window_position: str | None = None,
@@ -219,6 +222,8 @@ def render_scenario_overlay(
     max_frames: int | None = None,
     macos_compatible: bool = True,
 ) -> dict[str, Any]:
+    if view_frame not in {"rgb", "evs"}:
+        raise ValueError("view_frame must be rgb or evs")
     if timeline not in {"rgb", "event"}:
         raise ValueError("timeline must be rgb or event")
     if timeline == "event" and every_n != 1:
@@ -276,6 +281,10 @@ def render_scenario_overlay(
         evs, rgb, transform, projection, depth_m, np
     )
 
+    output_size = evs["size"] if view_frame == "evs" else rgb["size"]
+    rgb_to_view = np.linalg.inv(homography) if view_frame == "evs" else np.eye(3)
+    event_to_view = np.eye(3) if view_frame == "evs" else homography
+
     origin, selected_indices, reference_times = _selected_rgb_times(
         bag,
         rgb_topic,
@@ -325,12 +334,12 @@ def render_scenario_overlay(
     snapshots.mkdir()
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     overlay_writer = cv2.VideoWriter(
-        str(staging / "overlay_polarity.mp4"), fourcc, rate, rgb["size"]
+        str(staging / "overlay_polarity.mp4"), fourcc, rate, output_size
     )
     event_writer = cv2.VideoWriter(
-        str(staging / "polarity_only.mp4"), fourcc, rate, rgb["size"]
+        str(staging / "polarity_only.mp4"), fourcc, rate, output_size
     )
-    comparison_size = (rgb["size"][0] * 2, rgb["size"][1])
+    comparison_size = (output_size[0] * 2, output_size[1])
     comparison_writer = cv2.VideoWriter(
         str(staging / "rgb_vs_overlay.mp4"), fourcc, rate, comparison_size
     )
@@ -341,25 +350,49 @@ def render_scenario_overlay(
         shutil.rmtree(staging, ignore_errors=True)
         raise RuntimeError("OpenCV could not open the scenario MP4 writers")
 
-    map_evs = cv2.initUndistortRectifyMap(
-        evs["matrix"], evs["distortion"], None, evs["matrix"], evs["size"], cv2.CV_32FC1
-    )
-    map_rgb = cv2.initUndistortRectifyMap(
-        rgb["matrix"], rgb["distortion"], None, rgb["matrix"], rgb["size"], cv2.CV_32FC1
-    )
-    snapshot_indices = {
-        round(index * (len(reference_times) - 1) / min(11, len(reference_times) - 1))
-        for index in range(min(12, len(reference_times)))
-    } if len(reference_times) > 1 else {0}
+    try:
+        map_evs = cv2.initUndistortRectifyMap(
+            evs["matrix"], evs["distortion"], None, evs["matrix"], evs["size"], cv2.CV_32FC1
+        )
+        map_rgb = cv2.initUndistortRectifyMap(
+            rgb["matrix"], rgb["distortion"], None, rgb["matrix"], rgb["size"], cv2.CV_32FC1
+        )
+        common_valid = None
+        if view_frame == "evs":
+            # Linear sampling support must be valid in both sensors (including undistortion).
+            supports = []
+            for camera, maps, transform_view in ((rgb, map_rgb, rgb_to_view), (evs, map_evs, event_to_view)):
+                valid = np.ones((camera["size"][1], camera["size"][0]), dtype=np.float32)
+                valid = cv2.remap(valid, maps[0], maps[1], cv2.INTER_LINEAR,
+                                  borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                valid = cv2.warpPerspective(valid, transform_view, output_size,
+                                            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                supports.append(valid >= 0.999)
+            common_valid = supports[0] & supports[1]
+            if not common_valid.any():
+                raise ValueError("calibration yields no common field of view")
+            if not cv2.imwrite(str(staging / "common_valid_mask.png"), common_valid.astype("uint8") * 255):
+                raise RuntimeError("could not write common field-of-view mask")
 
-    rendered = 0
-    slowdown = 1000.0 / (step_ms * rate) if timeline == "event" else None
-    manifest = (staging / "frames.csv").open("w", newline="", encoding="utf-8")
-    frame_csv = csv.writer(manifest)
-    frame_csv.writerow([
-        "frame", "video_time_s", "reference_time_s", "relative_time_s",
-        "rgb_time_s", "rgb_age_ms", "event_start_us", "event_end_us", "event_count",
-    ])
+        snapshot_indices = {
+            round(index * (len(reference_times) - 1) / min(11, len(reference_times) - 1))
+            for index in range(min(12, len(reference_times)))
+        } if len(reference_times) > 1 else {0}
+
+        rendered = 0
+        slowdown = 1000.0 / (step_ms * rate) if timeline == "event" else None
+        manifest = (staging / "frames.csv").open("w", newline="", encoding="utf-8")
+        frame_csv = csv.writer(manifest)
+        frame_csv.writerow([
+            "frame", "video_time_s", "reference_time_s", "relative_time_s",
+            "rgb_time_s", "rgb_age_ms", "event_start_us", "event_end_us", "event_count",
+        ])
+    except Exception:
+        for writer in writers:
+            writer.release()
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
     cached_rgb_time = None
     try:
         try:
@@ -375,16 +408,22 @@ def render_scenario_overlay(
                     rgb_undistorted = cv2.remap(
                         rgb_image, map_rgb[0], map_rgb[1], cv2.INTER_LINEAR
                     )
+                    if view_frame == "evs":
+                        rgb_undistorted = cv2.warpPerspective(rgb_undistorted, rgb_to_view, output_size)
+                        rgb_undistorted[~common_valid] = (35, 35, 35)
                     cached_rgb_time = rgb_time
                 event_only, event_mask = _polarity_images(
                     polarity,
                     map_evs,
-                    homography,
-                    rgb["size"],
+                    event_to_view,
+                    output_size,
                     event_dilate_px,
                     cv2,
                     np,
                 )
+                if common_valid is not None:
+                    event_mask &= common_valid
+                    event_only[~common_valid] = (35, 35, 35)
                 overlay = _overlay_rgb(
                     rgb_undistorted, event_only, event_mask, alpha, np
                 )
@@ -458,6 +497,14 @@ def render_scenario_overlay(
         "time_sync": str(sync_file),
         "camchain": str(camchain_file),
         "projection": projection,
+        "view_frame": view_frame,
+        "output_size": list(output_size),
+        "common_valid_mask": "common_valid_mask.png" if view_frame == "evs" else None,
+        "camchain_sha256": hashlib.sha256(camchain_file.read_bytes()).hexdigest(),
+        "time_sync_sha256": hashlib.sha256(sync_file.read_bytes()).hexdigest(),
+        "reference_origin_s": origin,
+        "rgb_to_view_homography": rgb_to_view.tolist(),
+        "event_to_view_homography": event_to_view.tolist(),
         "depth_m": float(depth_m) if projection == "fixed-depth" else None,
         "event_window_ms": float(event_window_ms),
         "event_window_position": event_window_position,
@@ -490,5 +537,6 @@ def render_scenario_overlay(
         ),
     }
     write_yaml(staging / "summary.yaml", summary)
+    (staging / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     staging.replace(output)
     return summary

@@ -724,6 +724,7 @@ def command_scenario_overlay(args: argparse.Namespace) -> None:
         evs_camera=args.evs_camera,
         rgb_camera=args.rgb_camera,
         projection=args.projection,
+        view_frame=args.view_frame,
         depth_m=args.depth_m,
         event_window_ms=args.event_window_ms,
         event_window_position=args.event_window_position,
@@ -973,6 +974,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("rotation-only", "fixed-depth"),
         default="rotation-only",
     )
+    scenario_parser.add_argument("--view-frame", choices=("rgb", "evs"), default="rgb",
+                                 help="evs: warp RGB to EVS coordinates and mask common valid field of view.")
     scenario_parser.add_argument("--depth-m", type=float, default=1.0)
     scenario_parser.add_argument("--event-window-ms", type=float, help="Accumulation: default 10 ms for rgb, 2 ms for event timeline.")
     scenario_parser.add_argument(
