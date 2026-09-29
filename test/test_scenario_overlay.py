@@ -189,6 +189,23 @@ class SlowMotionTimingTest(unittest.TestCase):
                 if view_frame != 'rgb':
                     self.assertEqual(summary['common_valid_mask'], 'common_valid_mask.png')
 
+    def test_fov_guides_preserve_interior_and_mark_outside(self):
+        import numpy as np
+        from multi_sensor_calibration.scenario_overlay import _fov_guides, _draw_fov_guides
+        valid = np.zeros((80, 100), dtype=bool)
+        valid[10:70, 20:80] = True
+        original = valid.copy()
+        image = np.full((80, 100, 3), 160, dtype=np.uint8)
+        guides = _fov_guides(valid, np)
+        _draw_fov_guides(image, valid, guides)
+        np.testing.assert_array_equal(valid, original)
+        np.testing.assert_array_equal(image[40, 50], [160, 160, 160])
+        np.testing.assert_array_equal(image[40, 20], [0, 255, 255])
+        self.assertTrue(guides[0].any())
+        self.assertFalse((guides[0] & valid).any())
+        outside_plain = ~valid & ~guides[0] & ~guides[1]
+        self.assertTrue(np.all(image[outside_plain] == 40))
+
     def test_fixed_depth_rgb_to_evs_is_inverse_of_calibrated_projection(self):
         import numpy as np
         from multi_sensor_calibration.scenario_overlay import _projection_homography
